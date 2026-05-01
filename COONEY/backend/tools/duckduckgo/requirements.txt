@@ -1,0 +1,2 @@
+# Python Dependencies for Search Tools
+ddgs==9.14.1

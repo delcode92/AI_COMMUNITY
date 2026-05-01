@@ -1,0 +1,57 @@
+{
+  "name": "Cooney Dev Container",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bullseye",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    },
+    "ghcr.io/devcontainers-contrib/features/pnpm:2": {},
+    "ghcr.io/devcontainers-contrib/features/redis:2": {}
+  },
+  "forwardPorts": [3000, 5000, 7777],
+  "postCreateCommand": "cd /workspaces/project-AI_COMMUNITY/COONEY && pnpm install && cd backend && pnpm install && cd ../backend/tools && pip3 install -r requirements.txt",
+  "postStartCommand": "redis-server --daemonize yes",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode.makefile-tools",
+        "redhat.vscode-yaml",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "javascript.format.enable": true,
+        "typescript.format.enable": true,
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": true,
+        "python.formatting.provider": "black",
+        "files.associations": {
+          "*.md": "yaml"
+        }
+      }
+    }
+  },
+  "portsAttributes": {
+    "3000": {
+      "label": "Frontend (Next.js)",
+      "onAutoForward": "openBrowser"
+    },
+    "5000": {
+      "label": "Backend (Express)",
+      "onAutoForward": "notify"
+    },
+    "7777": {
+      "label": "Search API (Python)",
+      "onAutoForward": "notify"
+    }
+  },
+  "containerEnv": {
+    "REDIS_URL": "redis://localhost:6379"
+  }
+}

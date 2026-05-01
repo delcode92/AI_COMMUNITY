@@ -2,33 +2,6 @@
 
 Bukan sekadar grup diskusi, tapi tempat buat lo yang mau serius di ekosistem AI—dari sekadar user sampai jadi kreator. Kita fokus di kolaborasi nyata, keamanan sistem, hingga riset teknologi terbaru.
 
-## MCP Skeleton Server
-
-This repository includes a sample MCP (Model Context Protocol) server in `MCP_SKELETON/`.
-
-**Features:**
-- `greet` tool: Returns a friendly greeting message
-- `skeleton://info` resource: Provides server information
-
-**Usage:**
-```bash
-pnpm run mcp:start
-pnpm run mcp:test  # Run tests
-```
-
-## Cooney App
-
-A Next.js application in the `COONEY/` workspace.
-
-**Usage:**
-```bash
-pnpm run cooney:dev    # Development server
-pnpm run cooney:build  # Production build
-pnpm run cooney:start  # Start production server
-```
-
-Open http://localhost:3000 to view the app.
-
 ## Kita Bagi Jadi 4 Tier (Biar Obrolannya Nyambung)
 Kita tahu tiap orang punya starting point beda. Jadi pembahasan kita sesuaikan:
 
