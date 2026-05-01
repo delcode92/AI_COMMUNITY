@@ -1,0 +1,7 @@
+1. Temukan semua URL dan email dalam teks ini: 'Kunjungi https://openrouter.ai atau http://example.com, hubungi kami di admin@test.org atau support@dev.io, atau cek https://github.com/repo', dapatkan tanggal hari ini, gabungkan semuanya ke dalam JSON terstruktur dengan format {urls: [...], emails: [...], date: string}, lalu format hasilnya.
+
+2. Hitung 98765×4321+log10​(1000000), tuliskan angka lengkapnya dalam bentuk kata-kata, hitung berapa jumlah kata yang Anda tulis, dan simpan angka serta jumlah kata tersebut sebagai JSON di bawah kunci 'calc_words'.
+
+3. Format tanggal tepat 137 hari dari hari ini, hitung berapa menit rentang waktu tersebut, lalu konversi jumlah menitnya menjadi string dan ubah menjadi format slug (slugify).
+
+4. Ambil data mentah ini: name=John, age=34, score=94.7, active=true, last_login=2024-01-15, konversikan menjadi JSON yang valid, validasi datanya, simpan dengan nama 'user_profile', ambil kembali data tersebut, dan format tanggal hari ini sebagai ISO agar saya bisa menambahkannya sebagai salah satu bidang (field).
