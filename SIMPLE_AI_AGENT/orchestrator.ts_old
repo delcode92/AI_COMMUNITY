@@ -1,0 +1,150 @@
+import { SkillRouter } from './skillRouter';
+import { WorkflowEngine } from '../workflows/engine';
+import { BrowserStorage } from '../storage';
+import { AgentContext, ChatMessage, Workflow, ToolCallLog } from './types';
+
+const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
+const MODEL = 'claude-sonnet-4-20250514';
+
+interface AnthropicMessage {
+  role: 'user' | 'assistant';
+  content: string | ContentBlock[];
+}
+
+interface ContentBlock {
+  type: string;
+  [key: string]: unknown;
+}
+
+export class AgentOrchestrator {
+  constructor(
+    private router: SkillRouter,
+    private engine: WorkflowEngine,
+    private storage: BrowserStorage,
+    private apiKey: string,
+    private systemPrompt = 'You are a helpful AI agent. Use available tools to complete tasks accurately.'
+  ) {}
+
+  // ── Conversational chat with automatic tool use ───────────────────────────
+
+  async chat(
+    userMessage: string,
+    sessionId: string,
+    onToken?: (text: string) => void
+  ): Promise<string> {
+    const ctx = this.getOrCreateContext(sessionId);
+
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: userMessage,
+      timestamp: Date.now(),
+    };
+    this.storage.ls.appendMessage(sessionId, userMsg);
+
+    const history = this.storage.ls.getHistory(sessionId);
+    const messages: AnthropicMessage[] = history.map((m) => ({ role: m.role, content: m.content }));
+
+    const tools = this.router.toClaudeTools();
+    const toolCalls: ToolCallLog[] = [];
+
+    let response = await this.callClaude(messages, tools);
+
+    // Agentic loop — keep going until Claude stops calling tools
+    while (response.stop_reason === 'tool_use') {
+      const toolUseBlock = response.content.find((b: ContentBlock) => b.type === 'tool_use') as {
+        id: string; name: string; input: Record<string, unknown>;
+      } | undefined;
+
+      if (!toolUseBlock) break;
+
+      const t0 = performance.now();
+      const result = await this.router.call(toolUseBlock.name, toolUseBlock.input, ctx);
+      const durationMs = Math.round(performance.now() - t0);
+
+      toolCalls.push({ toolName: toolUseBlock.name, input: toolUseBlock.input, result, durationMs });
+
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: toolUseBlock.id, content: JSON.stringify(result) }],
+      });
+
+      response = await this.callClaude(messages, tools);
+    }
+
+    const finalText = response.content
+      .filter((b: ContentBlock) => b.type === 'text')
+      .map((b: ContentBlock) => b.text as string)
+      .join('');
+
+    const assistantMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: finalText,
+      timestamp: Date.now(),
+      toolCalls: toolCalls.length ? toolCalls : undefined,
+    };
+    this.storage.ls.appendMessage(sessionId, assistantMsg);
+
+    return finalText;
+  }
+
+  // ── Run a predefined workflow ─────────────────────────────────────────────
+
+  async runWorkflow(
+    workflow: Workflow,
+    sessionId: string,
+    onStep?: Parameters<WorkflowEngine['run']>[2]
+  ) {
+    const ctx = this.getOrCreateContext(sessionId);
+    return this.engine.run(workflow, ctx, onStep);
+  }
+
+  // ── Session management ────────────────────────────────────────────────────
+
+  getOrCreateContext(sessionId: string): AgentContext {
+    const existing = this.storage.ls.loadSession(sessionId);
+    if (existing) return existing;
+
+    const ctx: AgentContext = {
+      sessionId,
+      history: [],
+      credentials: this.storage.ls.loadCredentials(),
+    };
+    this.storage.ls.saveSession(ctx);
+    return ctx;
+  }
+
+  setCredential(name: string, value: string): void {
+    this.storage.ls.saveCredential(name, value);
+  }
+
+  // ── Internal Claude API call ──────────────────────────────────────────────
+
+  private async callClaude(messages: AnthropicMessage[], tools: ReturnType<SkillRouter['toClaudeTools']>) {
+    const res = await fetch(CLAUDE_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 4096,
+        system: this.systemPrompt,
+        messages,
+        tools,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Claude API error ${res.status}: ${err}`);
+    }
+
+    return res.json();
+  }
+}

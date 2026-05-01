@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+.yarn-store/
+*.log
+.env
+.env.*
+!.env.example
+.next/
+dist/
+**/*.env
+**/.env

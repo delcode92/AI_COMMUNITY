@@ -1,0 +1,17 @@
+{
+  "name": "mcp-skeleton",
+  "version": "1.0.0",
+  "description": "MCP Skeleton Server",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node test.js"
+  },
+  "keywords": [],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0"
+  },
+  "devDependencies": {}
+}
