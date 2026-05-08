@@ -1,0 +1,22 @@
+{
+  "name": "tui-monitoring",
+  "version": "1.0.0",
+  "description": "CYBERLAB // MISSION CONTROL - Terminal UI monitoring dashboard",
+  "main": "dashboard.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node dashboard.js",
+    "build": "tsc && node dashboard.js"
+  },
+  "keywords": ["tui", "dashboard", "monitoring", "blessed"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
