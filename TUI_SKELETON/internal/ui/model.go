@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"aicommunity.omniq.my.id/cliagent/internal/agent"
+	"aicommunity.omniq.my.id/cliagent/internal/skill"
 )
 
 // ── Tea messages ─────────────────────────────────────────────────────────────
@@ -35,7 +36,7 @@ type Model struct {
 	history      []agent.Message
 	entries      []chatEntry
 	streaming    bool
-	streamBuf    strings.Builder
+	streamBuf    *strings.Builder
 	cancelStream context.CancelFunc
 	streamCh     <-chan agent.StreamChunk
 	err          string
@@ -45,6 +46,17 @@ type Model struct {
 }
 
 func New() Model {
+	// Load skill configuration (if any)
+	skillMap, _ := skill.LoadSkills("skills")
+	var systemMsg []agent.Message
+	if len(skillMap) > 0 {
+		for _, s := range skillMap {
+			systemMsg = []agent.Message{{Role: "user", Content: s.SystemPrompt}}
+			fmt.Println("systemMsg: ", systemMsg)
+			break // use first skill only for now
+		}
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Type a message… (Enter sends · Alt+Enter newline · Ctrl+C quit)"
 	ta.Focus()
@@ -57,11 +69,12 @@ func New() Model {
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
 
-	return Model{
+	return Model{history: systemMsg,
 		viewport:  vp,
 		textarea:  ta,
 		client:    agent.NewClient(),
 		modelName: getModelName(),
+		streamBuf: &strings.Builder{},
 	}
 }
 
