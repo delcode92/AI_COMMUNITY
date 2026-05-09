@@ -3,6 +3,7 @@
    concepts(www.offsec.com/metasploit-unleashed), 
    tools desc (https://www.infosecmatter.com/metasploit-module-library/), 
    real world cases (https://raw.githubusercontent.com/dogasantos/msfcve/refs/heads/main/metasploit_cves.json)
+   pentest result (https://swisskyrepo.github.io/InternalAllTheThings/)
 )
 
 2. chunking, link strategy
