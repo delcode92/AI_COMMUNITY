@@ -70,4 +70,9 @@ var (
 	// Divider
 	DividerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorBorder))
+
+	// Highlight for selected completion
+	HighlightStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorGreen)).
+			Bold(true)
 )

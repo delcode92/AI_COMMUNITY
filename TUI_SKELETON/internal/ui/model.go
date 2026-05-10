@@ -64,25 +64,58 @@ func ExecuteTool(name string, args []string) (string, error) {
 // ── Model ────────────────────────────────────────────────────────────────────
 
 type Model struct {
-	viewport     viewport.Model
-	textarea     textarea.Model
-	client       *agent.Client
-	history      []agent.Message
-	entries      []chatEntry
-	streaming    bool
-	streamBuf    *strings.Builder
-	cancelStream context.CancelFunc
-	streamCh     <-chan agent.StreamChunk
-	err          string
-	width        int
-	height       int
-	modelName    string
-	skillMap     map[string]skill.Skill
-	currentSkill *skill.Skill
-	redisClient  *redis.Client
-	sessionID    string
-	compressBuf  *strings.Builder
-	compressCh   <-chan agent.StreamChunk
+	viewport        viewport.Model
+	textarea        textarea.Model
+	client          *agent.Client
+	history         []agent.Message
+	entries         []chatEntry
+	streaming       bool
+	streamBuf       *strings.Builder
+	cancelStream    context.CancelFunc
+	streamCh        <-chan agent.StreamChunk
+	err             string
+	width           int
+	height          int
+	modelName       string
+	skillMap        map[string]skill.Skill
+	currentSkill    *skill.Skill
+	redisClient     *redis.Client
+	sessionID       string
+	compressBuf     *strings.Builder
+	compressCh      <-chan agent.StreamChunk
+	showCompletions bool
+	completionInput string
+	selectedCmdIdx   int
+}
+
+// commands returns list of available commands
+func commands() []string {
+	return []string{
+		"/compress",
+		"/skill <name>",
+		"/tool {\"tool\":\"name\",\"args\":[\"arg1\"]}",
+	}
+}
+
+// filterCommands returns commands matching the prefix
+func filterCommands(prefix string) []string {
+	matches := []string{}
+	for _, cmd := range commands() {
+		if strings.HasPrefix(cmd, prefix) {
+			matches = append(matches, cmd)
+		}
+	}
+	return matches
+}
+
+// getAvailableCommands returns a formatted help string with all available commands
+func getAvailableCommands() string {
+	return `**Available Commands:**
+
+/skill <name>     - Switch to a different skill (e.g., /skill SampleAssistant)
+/compress         - Compress conversation to .memory/memory.md
+/tool {"tool":"name","args":["arg1"]} - Execute a whitelisted tool
+/                    - Show this help`
 }
 
 func loadGlobalPrompt(path string) (string, error) {
@@ -160,7 +193,7 @@ func New() Model {
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Type a message… (Enter sends · Alt+Enter newline · Ctrl+C quit)"
+	ta.Placeholder = "Type a message… (Enter sends · Alt+Enter newline · / for commands · Ctrl+C quit)"
 	ta.Focus()
 	ta.CharLimit = 4000
 	ta.SetWidth(80)
@@ -280,6 +313,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.saveHistory()
 			return m, tea.Quit
 
+		case tea.KeyUp:
+			// Navigate completions up
+			if m.showCompletions {
+				matches := filterCommands(m.completionInput)
+				if len(matches) > 0 {
+					m.selectedCmdIdx = (m.selectedCmdIdx - 1 + len(matches)) % len(matches)
+					m.textarea.SetValue(matches[m.selectedCmdIdx])
+				}
+			}
+			return m, nil
+
+		case tea.KeyDown:
+			// Navigate completions down
+			if m.showCompletions {
+				matches := filterCommands(m.completionInput)
+				if len(matches) > 0 {
+					m.selectedCmdIdx = (m.selectedCmdIdx + 1) % len(matches)
+					m.textarea.SetValue(matches[m.selectedCmdIdx])
+				}
+			}
+			return m, nil
+
+		case tea.KeyTab:
+			// Handle tab completion for commands
+			taVal := m.textarea.Value()
+			if strings.HasPrefix(taVal, "/") && !strings.Contains(taVal, " ") {
+				matches := filterCommands(taVal)
+				if len(matches) == 1 {
+					// Single match - complete it
+					m.textarea.SetValue(matches[0] + " ")
+					m.showCompletions = false
+				} else if len(matches) > 1 {
+					// Multiple matches - show them
+					m.showCompletions = true
+					m.completionInput = taVal
+					m.selectedCmdIdx = 0
+				}
+			}
+			return m, nil
+
 		case tea.KeyEnter:
 			if m.streaming {
 				break
@@ -290,6 +363,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.textarea.Reset()
 			m.err = ""
+			m.showCompletions = false
+
+			// Show command help when just "/" is typed
+			if input == "/" {
+				m.entries = append(m.entries, chatEntry{role: "assistant", content: getAvailableCommands()})
+				m.viewport.SetContent(m.renderMessages())
+				m.viewport.GotoBottom()
+				return m, nil
+			}
 
 			if strings.HasPrefix(input, "/skill ") {
 				skillName := strings.TrimSpace(strings.TrimPrefix(input, "/skill "))
@@ -356,7 +438,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, streamCmd = m.startStream()
 			cmds = append(cmds, streamCmd)
 		}
+	}
 
+	// Handle stream messages
+	switch msg.(type) {
+	case streamTokenMsg:
+		// handled below
+	case compressTokenMsg:
+		// handled below
+	case compressDoneMsg:
+		// handled below
+	case streamDoneMsg:
+		// handled below
+	case streamErrMsg:
+		// handled below
+	}
+
+	// Update textarea FIRST, then check completions
+	var taCmd, vpCmd tea.Cmd
+	m.textarea, taCmd = m.textarea.Update(msg)
+	m.viewport, vpCmd = m.viewport.Update(msg)
+	cmds = append(cmds, taCmd, vpCmd)
+
+	// Check completions AFTER textarea update
+	taVal := m.textarea.Value()
+	if strings.HasPrefix(taVal, "/") && !strings.Contains(taVal, " ") {
+		m.showCompletions = true
+		m.completionInput = taVal
+	} else {
+		m.showCompletions = false
+	}
+
+	switch msg := msg.(type) {
 	case streamTokenMsg:
 		m.streamBuf.WriteString(string(msg))
 		current := m.streamBuf.String()
@@ -406,11 +519,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 	}
-
-	var taCmd, vpCmd tea.Cmd
-	m.textarea, taCmd = m.textarea.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
-	cmds = append(cmds, taCmd, vpCmd)
 
 	return m, tea.Batch(cmds...)
 }
@@ -472,6 +580,27 @@ func (m Model) View() string {
 		border = InputFocusedBorderStyle
 	}
 	inputBox := border.Width(m.width - 2).Render(m.textarea.View())
+
+	// Show completions above input if typing /
+	if m.showCompletions {
+		matches := filterCommands(m.completionInput)
+		if len(matches) > 0 {
+			var compBox strings.Builder
+			compBox.WriteString(SubtleStyle.PaddingLeft(2).Render("Commands:"))
+			for i, match := range matches {
+				compBox.WriteString("\n")
+				if i == m.selectedCmdIdx {
+					compBox.WriteString(HighlightStyle.PaddingLeft(4).Render("▶ "+match))
+				} else {
+					compBox.WriteString(SubtleStyle.PaddingLeft(4).Render(match))
+				}
+			}
+			inputBox = lipgloss.JoinVertical(lipgloss.Left,
+				inputBox,
+				compBox.String(),
+			)
+		}
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.viewport.View(),
