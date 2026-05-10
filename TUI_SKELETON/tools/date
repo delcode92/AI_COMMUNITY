@@ -1,0 +1,3 @@
+#!/bin/bash
+# Date tool - returns current date
+date +"%Y-%m-%d"

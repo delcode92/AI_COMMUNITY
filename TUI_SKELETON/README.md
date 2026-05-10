@@ -1,6 +1,6 @@
 # tui-agent
 
-A simple CLI agent with a Bubbletea TUI and OpenRouter backend.
+A CLI agent with a Bubbletea TUI and OpenRouter backend. Features include global system prompts, dynamic skill switching, tool calling, Redis-backed history, and conversation compression.
 
 ## Project structure
 
@@ -11,10 +11,15 @@ tui-agent/
 ├── internal/
 │   ├── agent/
 │   │   └── client.go        # OpenRouter streaming client
+│   ├── skill/
+│   │   └── loader.go        # Skill configuration loader
 │   └── ui/
 │       ├── model.go         # Bubbletea model (Update / View)
 │       └── styles.go        # Lipgloss styles (opencode color scheme)
-├── go.mod
+├── skills/                   # Skill configuration files (.md)
+├── tools/                    # Executable tools for /tool command
+├── .system/system.md         # Global system prompt
+├── .memory/memory.md         # Compressed conversation summaries
 └── README.md
 ```
 
@@ -37,23 +42,72 @@ go run ./cmd/main.go
 |--------------|---------------------|
 | `Enter`      | Send message        |
 | `Alt+Enter`  | Insert newline      |
-| `Ctrl+C`     | Quit (or cancel stream) |
+| `Ctrl+C`     | Quit |
+
+## Commands
+
+### Global System Prompt
+
+Place your global system prompt in `.system/system.md`. This prompt is loaded at startup and prepended to all conversations, establishing session-wide policies.
+
+### Switching Skills
+
+Use `/skill <name>` to switch between different AI personas:
+
+```
+/skill SampleAssistant
+```
+
+Skills are defined in `.md` files in the `skills/` directory. The first skill in the directory is loaded by default.
+
+### Tool Calling
+
+Execute tools with `/tool <json>`:
+
+```
+/tool {"tool": "echo", "args": ["hello", "world"]}
+```
+
+Tools must be placed in the `tools/` directory and listed in the `TOOL_WHITELIST` environment variable (comma-separated). Default whitelist: `echo,time,date`.
+
+### Compress Conversation
+
+Use `/compress` to save a summarized version of your conversation to `.memory/memory.md`:
+
+```
+/compress
+```
+
+This sends your conversation history to the LLM for summarization, preserving key points while reducing memory usage. The full conversation remains in Redis.
+
+## Redis Configuration
+
+Set `REDIS_URL` to enable conversation history persistence:
+
+```bash
+export REDIS_URL=localhost:6379
+# or with password
+export REDIS_URL=rediss://:password@host:6379
+```
+
+The session ID can be customized with `SESSION_ID` env var (defaults to "default").
 
 ## Changing the model
 
-Edit `modelName` in `internal/ui/model.go`:
+Set the `MODEL_NAME` environment variable:
 
-```go
-modelName: "anthropic/claude-3.5-sonnet",
-// or: "openai/gpt-4o", "google/gemini-2.0-flash", etc.
+```bash
+export MODEL_NAME=openai/gpt-4o
 ```
 
 Any model available on https://openrouter.ai/models works.
 
-## What's next?
+## Development
 
-- [ ] System prompt / persona support
-- [ ] Conversation save/load
-- [ ] Multiple sessions / tabs
-- [ ] Tool/function calling
-- [ ] Markdown rendering (goldmark or glamour)
+```bash
+# Run tests
+go test ./...
+
+# Build
+go build -o tui-agent ./cmd/main.go
+```

@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"github.com/joho/godotenv"
+	"os/signal"
+	"syscall"
 
+	"github.com/joho/godotenv"
 	tea "github.com/charmbracelet/bubbletea"
 	"aicommunity.omniq.my.id/cliagent/internal/ui"
 )
@@ -17,11 +19,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	p := tea.NewProgram(
 		ui.New(),
-		tea.WithAltScreen(),       // full-screen TUI
-		tea.WithMouseCellMotion(), // optional: mouse support
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
+
+	// Run with signal handling
+	go func() {
+		<-sigChan
+		p.Quit()
+	}()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

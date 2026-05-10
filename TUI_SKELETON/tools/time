@@ -1,0 +1,3 @@
+#!/bin/bash
+# Time tool - returns current time
+date +"%H:%M:%S"
