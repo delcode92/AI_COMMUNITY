@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"aicommunity.omniq.my.id/cliagent/internal/agent"
+	"aicommunity.omniq.my.id/cliagent/internal/skill"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/redis/go-redis/v9"
-	"aicommunity.omniq.my.id/cliagent/internal/agent"
-	"aicommunity.omniq.my.id/cliagent/internal/skill"
 )
 
 // ── Tea messages ─────────────────────────────────────────────────────────────
@@ -31,6 +31,23 @@ type compressDoneMsg struct{ summary string }
 type chatEntry struct {
 	role    string // "user" | "assistant"
 	content string
+}
+
+// ── reAct state ───────────────────────────────────────────────────────────────
+
+type ToolCall struct {
+	Tool  string            `json:"tool"`
+	Args  map[string]string `json:"args"`
+	Ready bool              `json:"ready"`
+}
+
+type ReactState struct {
+	ClarificationNeeded   bool       `json:"clarification_needed"`
+	MissingContext        []string   `json:"missing_context"`
+	ClarificationQuestion string     `json:"clarification_question"`
+	ProposedWorkflow      string     `json:"proposed_workflow,omitempty"`
+	PendingToolCalls      []ToolCall `json:"pending_tool_calls,omitempty"`
+	Timestamp             time.Time  `json:"timestamp"`
 }
 
 // ── Tool config ─────────────────────────────────────────────────────────────
@@ -85,7 +102,10 @@ type Model struct {
 	compressCh      <-chan agent.StreamChunk
 	showCompletions bool
 	completionInput string
-	selectedCmdIdx   int
+	selectedCmdIdx  int
+	// reAct state tracking
+	reactState *ReactState
+	reactBuf   *strings.Builder
 }
 
 // commands returns list of available commands
@@ -168,6 +188,106 @@ func (m *Model) loadHistory() ([]agent.Message, error) {
 	return history, nil
 }
 
+// ── reAct state management ───────────────────────────────────────────────────
+
+func (m *Model) saveReactState(state ReactState) error {
+	if m.redisClient == nil {
+		return nil
+	}
+	ctx := context.Background()
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("session:%s:react_state", m.sessionID)
+	return m.redisClient.Set(ctx, key, data, 0).Err()
+}
+
+func (m *Model) loadReactState() (*ReactState, error) {
+	if m.redisClient == nil {
+		return nil, fmt.Errorf("redis client not initialized")
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf("session:%s:react_state", m.sessionID)
+	data, err := m.redisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	var state ReactState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func (m *Model) clearReactState() error {
+	if m.redisClient == nil {
+		return nil
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf("session:%s:react_state", m.sessionID)
+	return m.redisClient.Del(ctx, key).Err()
+}
+
+func (m *Model) persistReactLogFile(state ReactState) error {
+	logEntry := map[string]interface{}{
+		"clarification_needed":   state.ClarificationNeeded,
+		"missing_context":        state.MissingContext,
+		"clarification_question": state.ClarificationQuestion,
+		"proposed_workflow":      state.ProposedWorkflow,
+		"timestamp":              state.Timestamp.Format("2006-01-02 15:04:05"),
+	}
+
+	os.MkdirAll(".memory/react_logs", 0755)
+	logFile := fmt.Sprintf(".memory/react_logs/%s.log", m.sessionID)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	data, _ := json.MarshalIndent(logEntry, "", "  ")
+	f.WriteString(fmt.Sprintf("%s\n", string(data)))
+	return nil
+}
+
+// ── Clarification detection ───────────────────────────────────────────────────
+
+func (m *Model) parseClarificationResponse(response string) (needsClarification bool, clarification string, missingContext []string) {
+	lower := strings.ToLower(response)
+	markers := []string{
+		"could you clarify", "please specify", "what type", "which data",
+		"more information", "i need to know", "before i can", "to proceed",
+		"could you tell me", "please provide", "i would need",
+	}
+
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			missingContext = m.extractMissingContext(response)
+			return true, response, missingContext
+		}
+	}
+	return false, "", nil
+}
+
+func (m *Model) extractMissingContext(response string) []string {
+	var missing []string
+	lines := strings.Split(response, "\n")
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "•") || strings.HasPrefix(trimmed, "*") {
+			item := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+			item = strings.TrimSpace(strings.TrimPrefix(item, "•"))
+			item = strings.TrimSpace(strings.TrimPrefix(item, "*"))
+			if item != "" && !strings.Contains(strings.ToLower(item), "could you") && !strings.Contains(strings.ToLower(item), "please") {
+				missing = append(missing, item)
+			}
+		}
+	}
+	return missing
+}
+
 func New() Model {
 	globalPrompt, err := loadGlobalPrompt(".system/system.md")
 	if err != nil {
@@ -216,11 +336,17 @@ func New() Model {
 		redisClient:  redisClient,
 		sessionID:    sessionID,
 		compressBuf:  &strings.Builder{},
+		reactBuf:     &strings.Builder{},
 	}
 
 	loadedHistory, err := m.loadHistory()
 	if err == nil && len(loadedHistory) > 0 {
 		m.history = loadedHistory
+	}
+
+	// Load any existing reAct state from Redis
+	if reactState, err := m.loadReactState(); err == nil {
+		m.reactState = reactState
 	}
 
 	if m.currentSkill != nil {
@@ -361,6 +487,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if input == "" {
 				break
 			}
+
+			// Check for pending reAct state BEFORE normal processing
+			if m.reactState != nil && m.reactState.ClarificationNeeded {
+				_ = m.clearReactState()
+				m.reactState = nil
+
+				// Add user's clarification to conversation
+				m.history = append(m.history, agent.Message{Role: "user", Content: input})
+				m.entries = append(m.entries, chatEntry{role: "user", content: input})
+
+				// Re-trigger LLM with new context - auto-resume workflow
+				m.streaming = true
+				m.streamBuf.Reset()
+				m.viewport.SetContent(m.renderMessages())
+				m.viewport.GotoBottom()
+				var streamCmd tea.Cmd
+				m, streamCmd = m.startStream()
+				cmds = append(cmds, streamCmd)
+				return m, tea.Batch(cmds...)
+			}
+
 			m.textarea.Reset()
 			m.err = ""
 			m.showCompletions = false
@@ -505,7 +652,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamDoneMsg:
 		m.streaming = false
-		m.history = append(m.history, agent.Message{Role: "assistant", Content: m.streamBuf.String()})
+		response := m.streamBuf.String()
+
+		// Check for clarification needed in LLM response
+		needsClarification, clarification, missingContext := m.parseClarificationResponse(response)
+		if needsClarification {
+			reactState := ReactState{
+				ClarificationNeeded:   true,
+				MissingContext:        missingContext,
+				ClarificationQuestion: clarification,
+				Timestamp:             time.Now(),
+			}
+			_ = m.saveReactState(reactState)
+			_ = m.persistReactLogFile(reactState)
+			m.reactState = &reactState
+
+			// Update existing entry instead of appending (already created during streaming)
+			if len(m.entries) > 0 && m.entries[len(m.entries)-1].role == "assistant" {
+				m.entries[len(m.entries)-1].content = clarification
+			} else {
+				m.entries = append(m.entries, chatEntry{role: "assistant", content: clarification})
+			}
+			m.viewport.SetContent(m.renderMessages())
+			m.viewport.GotoBottom()
+			_ = m.saveHistory()
+			return m, tea.Batch(cmds...)
+		}
+
+		// No clarification needed - save normally
+		_ = m.clearReactState()
+		m.history = append(m.history, agent.Message{Role: "assistant", Content: response})
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 		_ = m.saveHistory()
@@ -590,7 +766,7 @@ func (m Model) View() string {
 			for i, match := range matches {
 				compBox.WriteString("\n")
 				if i == m.selectedCmdIdx {
-					compBox.WriteString(HighlightStyle.PaddingLeft(4).Render("▶ "+match))
+					compBox.WriteString(HighlightStyle.PaddingLeft(4).Render("▶ " + match))
 				} else {
 					compBox.WriteString(SubtleStyle.PaddingLeft(4).Render(match))
 				}

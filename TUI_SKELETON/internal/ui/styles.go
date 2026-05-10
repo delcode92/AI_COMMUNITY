@@ -5,18 +5,18 @@ import "github.com/charmbracelet/lipgloss"
 // opencode-inspired color palette
 const (
 	// Darker black background
-	colorBg       = "#000000"
-	colorBgPanel  = "#0a0a0a"
-	colorBorder   = "#1a1a1a"
+	colorBg      = "#000000"
+	colorBgPanel = "#0a0a0a"
+	colorBorder  = "#1a1a1a"
 	// Light orange accent colors
-	colorGreen    = "#ffb86c" // primary accent (was green)
-	colorTeal     = "#ffb86c" // secondary accent
-	colorMuted    = "#555555"
-	colorText     = "#f5f5f5"
-	colorSubtle   = "#aaaaaa"
-	colorUser     = "#ffb86c"
-	colorError    = "#ff5555"
-	colorWaiting  = "#ffb86c"
+	colorGreen   = "#ffb86c" // primary accent (was green)
+	colorTeal    = "#ffb86c" // secondary accent
+	colorMuted   = "#555555"
+	colorText    = "#f5f5f5"
+	colorSubtle  = "#aaaaaa"
+	colorUser    = "#ffb86c"
+	colorError   = "#ff5555"
+	colorWaiting = "#ffb86c"
 )
 
 var (
@@ -75,4 +75,18 @@ var (
 	HighlightStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorGreen)).
 			Bold(true)
+
+	// reAct clarification box
+	ClarificationStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorGreen)).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(colorGreen)).
+				Padding(0, 1)
+
+	// Workflow proposal display
+	WorkflowProposalStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorTeal)).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(colorMuted)).
+				Padding(0, 1)
 )
