@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -197,6 +198,14 @@ func (m Model) Init() tea.Cmd { return textarea.Blink }
 // ──────────────────────────────────────────────────────────────────────────
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+
+	f, err := tea.LogToFile("debug.log", "my-agent")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -252,11 +261,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case tea.KeyEnter:
+			log.Printf("inside enter ...")
+
 			if m.streaming {
 				return m, nil
 			}
 
 			input := strings.TrimSpace(m.textarea.Value())
+			log.Printf(input)
 
 			if m.mode == "clarify" {
 				return m.handleClarifyInput(input)

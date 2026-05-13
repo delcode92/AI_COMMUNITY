@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	// "log"
 	// "time"
 
 	"github.com/joho/godotenv"
@@ -13,6 +14,13 @@ import (
 )
 
 func main() {
+
+	// f, err := tea.LogToFile("debug.log", "my-agent")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer f.Close()
+
 	// Load environment variables from .env if present
 	_ = godotenv.Load()
 	if os.Getenv("OPENROUTER_API_KEY") == "" {
