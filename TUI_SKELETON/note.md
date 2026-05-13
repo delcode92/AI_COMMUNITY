@@ -32,6 +32,19 @@
 
     client.Send() in client.go opens a streaming HTTP connection and pushes StreamChunk values into a Go channel as tokens arrive.
 
+    **How the tokens flow to your screen:**
+
+    The LLM doesn't send the full answer at once. Instead, OpenRouter streams the
+    response as small text chunks (tokens) over a single HTTP connection. Each chunk
+    arrives in the Go channel via `client.Send()`. `readToken()` reads ONE chunk,
+    wraps it as a `streamTokenMsg`, and Bubble Tea delivers it back to `Update()`.
+    There, the token is appended to `m.streamBuf` and the viewport is re-rendered —
+    so you literally see the response appear character-by-character in the terminal.
+    After rendering, `readToken(m.streamCh)` is returned as the next scheduled
+    command, creating a loop that keeps reading until the stream ends
+    (`msg.Done == true`). This is the core fix from earlier: without re-scheduling
+    readToken, only the first token was ever read and the stream appeared to hang.
+
     ---
 
     3. readToken() — the Bridge Between Channel and Bubble Tea
@@ -78,10 +91,10 @@
      2     m.streaming = false
      3     m.onStreamDone(m.streamBuf.String())   // process the full response
 
-    onStreamDone() (line ~430) is a method on *Model and checks for, in priority order:
-     - Clarification requests → sets mode = "clarify"
-     - Workflows (strict: 2+ steps AND at least one tool) → sets mode = "workflow"
-     - Standalone tool calls (4 regex patterns, including OpenAI XML) → sets mode = "tool_confirm"
+    onStreamDone() (line ~506) is a method on *Model and checks for, in priority order:
+     1. Clarification requests → sets mode = "clarify"
+     2. Workflows (strict: 2+ steps AND at least one tool) → calls extractToolCommands() first, passes detected tools to parseWorkflow() → sets mode = "workflow"
+     3. Standalone tool calls (4 regex patterns, including OpenAI XML) → single tool → applyManualTool(); multiple tools → queue as workflow steps
 
     ---
 
@@ -91,7 +104,8 @@
     │ File                         │ What It Does                                                                                                         │
     ├──────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
     │ internal/ui/model.go         │ Main state machine: Update(), onStreamDone(), startStream(), runNextStep(), handleToolConfirm(), handleClarifyInput(),│
-    │                              │ handleWorkflowConfirm(), readToken(), renderMessages(), updateView(), renderBoldMarkdown(), isToolLine(), regexpMatch()│
+    │                              │ handleWorkflowConfirm(), readToken(), renderMessages(), updateView(), renderBoldMarkdown(), isToolLine(), regexpMatch(),│
+    │                              │ parseWorkflow(), extractStepAction(), formatArgsForJSON(), parseWorkflowFromLLM()                                      │
     ├──────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
     │ internal/ui/model_tools.go   │ extractToolCommands() — 4 regex patterns (/, bare JSON, markdown code block, OpenAI XML); parseAndAddTool()           │
     ├──────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -108,7 +122,7 @@
 
     The Recursion in One Sentence
 
-    `readToken()` → `streamTokenMsg` → `Update()` → `readToken()` is the streaming loop, while `onStreamDone()` → mode change → user input → `startStream()` → `onStreamDone()` is
+    `readToken()` → `streamTokenMsg` → `Update()` → `readToken()` is the streaming loop, while `onStreamDone()` → `extractToolCommands()` → `parseWorkflow()` → mode change → user input → `startStream()` → `onStreamDone()` is
     the conversational recursion. Tool execution inserts itself into this loop by running locally, feeding the result back into m.history, and calling startStream() again to send
     the enriched context to the LLM.
 
@@ -147,6 +161,22 @@
     │ Only first tool executed │ onStreamDone extracted all tools via extractToolCommands but only    │ When multiple tools detected: if single tool use original prompt flow; if       │
     │                          │ passed tools[0] to applyManualTool, silently dropping the rest       │ multiple, convert all to pendingTodos and route through workflow machinery for  │
     │                          │                                                                              sequential execution with user confirmation per step                           │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+    │ extractStepAction        │ 3 nested loops checking "Step N:", "N.", bullets, case variants —     │ Replaced with single regex:                                                     │
+    │ overcomplicated          │ all doing the same thing in different ways                            │ `(?i)^(?:step\s+\d+:\s*|^\d+\.\s*|[-*•]\s+)(.*)`                               │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+    │ Tools silently skipped   │ parseWorkflow stored raw LLM line as ToolCmd (e.g.                    │ parseWorkflow now takes `detectedTools []pendingTool` param from                │
+    │ in workflows             │ `/tool {"tool":"read","args":["x"]}`). runNextStep tried               │ extractToolCommands() and builds clean JSON ToolCmd. No more format mismatch.   │
+    │                          │ json.Unmarshal on it — `/tool ` prefix made it invalid JSON.          │                                                                                  │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+    │ Silent failures in       │ If json.Unmarshal failed OR findToolByName returned nil, step was     │ Added error chat entries: "Tool parse error: ..." and "Unknown tool: ..."       │
+    │ runNextStep              │ silently skipped — no error message, no user feedback                 │ so user sees why a step was skipped                                             │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+    │ parseWorkflow only       │ parseWorkflow only looked at i+1 for tool lines. If LLM put tool      │ parseWorkflow now uses extractToolCommands() on the full response — handles     │
+    │ checks next line         │ on same line as step, or separated by blank line, it was missed       │ all 4 formats (/, bare JSON, code block, OpenAI XML) anywhere in the output     │
+    ├──────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+    │ formatArgsForJSON        │ strings.Fields(args) split on whitespace — "hello world" became       │ Replaced with json.Marshal(parts) for proper JSON string quoting                │
+    │ splits args wrong        │ two args ["hello", "world"] instead of one                            │                                                                                  │
     └──────────────────────────┴──────────────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
 
     Summary of ALL features added
@@ -163,4 +193,40 @@
     ├──────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
     │ Code cleanup                 │ Removed duplicate extractToolCommands/parseToolJSON from model.go; removed      │
     │                              │ unused regexp import; removed debug KeyRunes handler                           │
+    ├──────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+    │ Simplified step parsing      │ extractStepAction replaced 3 nested loops with single regex                    │
+    ├──────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+    │ Reliable workflow tool       │ parseWorkflow now takes detectedTools param from extractToolCommands() —       │
+    │ detection                    │ handles all 4 tool formats anywhere in LLM output, not just next-line           │
+    ├──────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+    │ Error surfacing in workflows │ runNextStep shows "Tool parse error" and "Unknown tool" messages in chat       │
+    ├──────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+    │ Proper JSON arg quoting      │ formatArgsForJSON uses json.Marshal instead of strings.Fields                  │
     └──────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
+
+
+─── Where the System Prompt Lives in the Code ──────────────────────────────────
+
+When the app starts, the New() function (model.go line ~88) does this:
+
+  1. Reads .system/system.md from disk via loadFile()
+  2. Inserts it as the VERY FIRST message in m.history with role "system"
+  3. Then appends the skill's system prompt after it (if a skill is loaded)
+  4. Then if Redis has a saved conversation, that replaces everything (so saved
+     history always wins over the default prompt)
+
+Every time you send a message, startStream() calls m.send(ctx, m.history),
+which sends the ENTIRE history slice — system prompt first, then all user and
+assistant messages — to OpenRouter. The LLM sees the system message at index 0
+and uses it to shape its personality, rules, and tool-calling behavior for the
+whole session.
+
+Why it's done this way:
+  • The system prompt is loaded once at startup and never modified during the
+    session, so the LLM always gets consistent baseline instructions.
+  • It sits at the bottom of history (index 0), so newer messages have more
+    influence, but the foundational rules from system.md are always present.
+  • If Redis saves and restores a conversation, the saved messages replace the
+    default history — this means a resumed session picks up exactly where it
+    left off, with the user's past context but without re-injecting the system
+    prompt on top.

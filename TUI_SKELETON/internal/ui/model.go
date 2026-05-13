@@ -165,6 +165,36 @@ func New() Model {
 func (m Model) Init() tea.Cmd { return textarea.Blink }
 
 // ── Update ──────────────────────────────────────────────────────────────────
+//
+// Update is the main event handler. It receives every Bubble Tea message
+// (keypresses, stream tokens, window resize, etc.) and returns a new Model
+// + a tea.Cmd (an effect to run).
+//
+// Two big branches:
+//
+//   1) tea.KeyMsg  — user typed something
+//      ├─ KeyCtrlC      → quit
+//      ├─ KeyUp/Down    → command-menu navigation (only when m.showCmds)
+//      ├─ KeyTab        → autocomplete cycle for "/" commands
+//      └─ KeyEnter      → the main "send" path
+//         * If m.streaming is true → block (still receiving tokens)
+//         * If m.mode is "clarify"/"workflow"/"tool_confirm" → route to
+//           the matching handler (handleClarifyInput, handleWorkflowConfirm,
+//           handleToolConfirm).  These set mode back to "" when done.
+//         * Otherwise → normal chat: append to history, start streaming.
+//
+//   2) Stream / other messages  — processed after key handling
+//      ├─ streamTokenMsg → append token to buffer, re-render, schedule
+//      │                  the NEXT readToken (the streaming loop)
+//      ├─ streamDoneMsg  → m.streaming=false, call onStreamDone() which
+//      │                  routes to clarify / workflow / tool pipelines
+//      ├─ streamErrMsg   → m.streaming=false, show error
+//      └─ compressTokenMsg / compressDoneMsg → compression stream
+//
+// IMPORTANT: m is a *value receiver* for Update (not *Model).  Mutations
+// to m inside Update are local — the returned tea.Model carries state
+// forward.  Handler methods that need to persist state use *Model receivers.
+// ──────────────────────────────────────────────────────────────────────────
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
