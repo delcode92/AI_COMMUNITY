@@ -1,0 +1,22 @@
+#!/bin/bash
+# Shell tool - executes commands with safety constraints
+
+# Block dangerous patterns - use fgrep -i to avoid regex issues
+BLOCKED_PATTERNS="rm -rf / rm -rf ~ mkfs dd if= > /dev/sd chmod -R 777 / shutdown reboot init 0 init 6 :(){ :|:& };: wget http curl -X POST > /dev/null 2>&1"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: shell <command> [args...]" >&2
+    exit 1
+fi
+
+# Check command for dangerous patterns (case insensitive)
+cmd_line="$*"
+for pattern in $BLOCKED_PATTERNS; do
+    if echo "$cmd_line" | fgrep -i -- "$pattern" > /dev/null 2>&1; then
+        echo "Error: Command contains blocked pattern: $pattern" >&2
+        exit 1
+    fi
+done
+
+# Execute the command
+"$@"

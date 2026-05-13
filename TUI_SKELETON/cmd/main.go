@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	// "time"
 
 	"github.com/joho/godotenv"
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +29,13 @@ func main() {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+
+	// Debug: set initial debug info after a short delay to ensure TUI is ready
+	// go func() {
+	// 	// time.Sleep(200 * time.Millisecond)
+	// 	p.Send(ui.DebugMsg{Msg: "\n\napplication started 123\n"})
+	// 	p.Send(ui.DebugMsg{Msg: "coba 123\n"})
+	// }()
 
 	// Run with signal handling
 	go func() {

@@ -1,365 +1,116 @@
-# TUI Agent Workflow + reAct Implementation Plan
+# Plan: AI CLI Agent Workflow Improvement
 
-## Overview
+## Current Issues
+- `executeNextTodo()` runs all steps immediately without user confirmation
+- No human-readable format for todo lists (shown as raw output during execution)
+- Workflow state not persisted to Redis (lost between sessions)
+- No reAct-style confirmation before tool-using steps
 
-This plan implements a **Hybrid Workflow** system with **reAct (Reasoning + Action)** capabilities for handling both clear requests and ambiguous prompts. The agent can auto-suggest tool execution after clarifying context, persist workflow state, and resume seamlessly once user provides missing information.
+## Implementation Completed ✅
 
----
+### 1. Added workflow confirmation state to Model struct ✅
+- Added `pendingTodoList *TodoList` - workflow waiting for confirmation
+- Added `awaitingConfirmation bool` - flag for confirmation state
+- Added `workflowMode string` - track if in "pending", "executing", or "idle" mode
+- Added `currentStepIndex int` - which step we're on during execution
 
-## Core Components
+### 2. Created human-readable todo list display ✅
+- Added `formatTodoListAsBullets()` method that formats as:
+  ```
+  **Proposed Workflow:**
 
-### 1. **System Prompt Enhancement** (`.system/system.md`)
+  • Step 1: Create project directory
+  • Step 2: Initialize git repo
+  • Step 3: Create README.md
 
-**Purpose**: Instruct LLM on when to ask clarifying questions vs. propose workflows
+  Proceed? (y/Enter=yes, n=no)
+  ```
 
-**Add these guidelines**:
-```markdown
-# reAct Pattern
-Before taking action or suggesting workflows:
-1. Analyze if the user's request is specific enough
-2. If AMBIGUOUS or BROAD → ask clarifying questions (DO NOT proceed)
-3. If CLEAR → propose workflow and await confirmation
+### 3. Persisted workflow state to Redis ✅
+- Added `saveWorkflowToRedis()` - saves todo list to `session:{id}:workflow`
+- Added `appendWorkflowToMemory()` - saves completed steps to `.memory/memory.md`
 
-Example clarification:
-"Before I create that chart, could you clarify:
-- What type (bar, line, pie)?
-- What data source?
-- What time range?"
-```
+### 4. Added confirmation prompt before execution ✅
+- When workflow detected, shows bullet list and waits for confirmation
+- User types "y", "yes", or presses Enter to confirm
+- User types "n" or "no" to cancel
+- For tool steps during execution: shows `Execute tool? (y/n)` prompt
 
----
+### 5. Execute workflow step-by-step with reAct ✅
+- Added `executeWorkflowStep()` - runs one step at a time
+- Non-tool steps execute immediately and auto-continue
+- Tool steps require explicit confirmation
+- After confirmation, continues to next step
 
-### 2. **New Data Structures** (`internal/ui/model.go`)
+### 6. Update Redis/memory.md after each step ✅
+- `saveWorkflowToRedis()` called after each step
+- `appendWorkflowToMemory()` appends to `.memory/memory.md` with timestamp
 
-#### `ReactState` Struct
-```go
-type ToolCall struct {
-    Tool  string            `json:"tool"`
-    Args  map[string]string `json:"args"`
-    Ready bool              `json:"ready"`
-}
+## Key Changes Made to `internal/ui/model.go`
 
-type ReactState struct {
-    ClarificationNeeded     bool       `json:"clarification_needed"`
-    MissingContext          []string   `json:"missing_context"`
-    ClarificationQuestion   string     `json:"clarification_question"`
-    ProposedWorkflow        string     `json:"proposed_workflow,omitempty"`
-    PendingToolCalls        []ToolCall `json:"pending_tool_calls,omitempty"`
-    Timestamp               time.Time  `json:"timestamp"`
-}
-```
+1. **Updated `executeNextTodo()`** - Now shows workflow and waits for confirmation instead of auto-executing
 
-**Purpose**: Track clarification loops and pending workflow execution
+2. **Added `formatTodoListAsBullets()`** - Formats todo items as human-readable bullet points
 
----
+3. **Added `executeWorkflowStep()`** - Single-step execution with tool confirmation
 
-### 3. **Redis Integration for reAct State**
+4. **Added `confirmWorkflowTool()`** - Executes confirmed tool step
 
-#### New Redis Keys
-- `session:{id}:react_state` - Current reAct state (clarification needed, pending tools)
-- `session:{id}:workflow` - Existing workflow state
-- `session:{id}:history` - Existing chat history
+5. **Added `saveWorkflowToRedis()`** - Persists workflow state
 
-#### New Functions
-```go
-func (m *Model) saveReactState(state ReactState) error
-func (m *Model) loadReactState() (*ReactState, error)
-func (m *Model) clearReactState() error
-```
+6. **Added `appendWorkflowToMemory()`** - Saves completed steps to memory.md
 
----
+7. **Updated KeyEnter handler** - Added workflow confirmation input handling
 
-### 4. **reAct Flow Implementation** (`internal/ui/model.go`)
-
-#### A. **Clarification Detection** (in `streamDoneMsg` case)
-```go
-response := m.streamBuf.String()
-needsClarification, clarification, missingContext := m.parseClarificationResponse(response)
-
-if needsClarification {
-    reactState := ReactState{
-        ClarificationNeeded: true,
-        MissingContext: missingContext,
-        ClarificationQuestion: clarification,
-        Timestamp: time.Now(),
-    }
-    _ = m.saveReactState(reactState)
-    _ = m.persistReactLogFile(reactState)
-    
-    m.entries = append(m.entries, chatEntry{role: "assistant", content: clarification})
-    m.viewport.SetContent(m.renderMessages())
-    m.viewport.GotoBottom()
-    _ = m.saveHistory()
-    return m
-}
-```
-
-#### B. **Clarification Parser**
-```go
-func (m *Model) parseClarificationResponse(response string) (
-    needsClarification bool, 
-    clarification string, 
-    missingContext []string)
-
-func (m *Model) extractMissingContext(response string) []string
-```
-
-**Markers detected**: "could you clarify", "please specify", "what type", which data", "more information", "i need to know", "before i can"
-
-#### C. **Auto-Resume on User Reply** (in `tea.KeyEnter` case)
-```go
-// Check for pending reAct state BEFORE normal processing
-reactState, err := m.loadReactState()
-if err == nil && reactState.ClarificationNeeded {
-    _ = m.clearReactState()
-    
-    // Add clarification to conversation
-    m.history = append(m.history, agent.Message{Role: "user", Content: input})
-    m.entries = append(m.entries, chatEntry{role: "user", content: input})
-    
-    // Re-trigger LLM with new context - auto-resume workflow
-    m.streaming = true
-    m.streamBuf.Reset()
-    m.viewport.SetContent(m.renderMessages())
-    m.viewport.GotoBottom()
-    var streamCmd tea.Cmd
-    m, streamCmd = m.startStream()
-    cmds = append(cmds, streamCmd)
-    return m, tea.Batch(cmds...)
-}
-
-// Normal flow (no reAct state)
-```
+## Testing
+- Code compiles successfully with `go build ./...`
+- Variables: OPENROUTER_API_KEY required for running
 
 ---
 
-### 5. **File Persistence**
+## Additional Work: File Manipulation Toolkit ✅
 
-#### New File Structure
-```
-.memory/
-  ├── memory.md                 # Conversation summaries
-  ├── workflows/
-  │   └── {sessionId}.json      # Workflow execution logs
-  └── react_logs/
-      └── {sessionId}.json      # reAct clarification loop logs
-```
+Created a basic file toolkit for handling files and directories within the TUI agent:
 
-#### New Functions
-```go
-func (m *Model) persistReactLogFile(state ReactState) error
-func (m *Model) saveWorkflowState(workflow WorkflowState) error
-func (m *Model) loadWorkflowState() (*WorkflowState, error)
-```
+### Tools Created
+| Tool | Purpose | Usage Example |
+|------|---------|---------------|
+| `read` | Read file contents | `{"tool":"read","args":["file.txt"]}` |
+| `write` | Write content to file | `{"tool":"write","args":["file.txt","content"]}` |
+| `list` | List directory contents | `{"tool":"list","args":["."]}` |
+| `mkdir` | Create directories | `{"tool":"mkdir","args":["dirname"]}` |
 
----
+### Implementation Details
+- All tools are shell scripts in `tools/` directory
+- Made executable with `chmod +x`
+- Integrated with existing tool execution system via `/tool` command
+- Requires `TOOL_WHITELIST` environment variable to include new tools
 
-### 6. **Hybrid Workflow Execution**
-
-#### Tool Schema Registration
-```go
-type ToolSchema struct {
-    Name        string                 `json:"name"`
-    Description string                 `json:"description"`
-    Parameters  map[string]interface{} `json:"parameters"`
-}
-
-var toolSchemas = []ToolSchema{
-    {
-        Name: "echo",
-        Description: "Echo text arguments",
-        Parameters: map[string]interface{}{
-            "args": map[string]string{
-                "type": "array",
-                "items": {"type": "string"},
-            },
-        },
-    },
-    // ... add more tools as needed
-}
-```
-
-#### Workflow Parser (detects LLM-intended tool calls)
-```go
-func (m *Model) parseWorkflowFromResponse(response string) ([]ToolCall, error) {
-    // Extract JSON blocks from text response
-    // Extract structured tool call suggestions
-    // Validate against TOOL_WHITELIST
-    // Return pending ToolCall slice
-}
-```
-
-#### User Confirmation Flow
-```go
-// After detecting workflow from LLM response:
-if workflowCalls, err := m.parseWorkflowFromResponse(response); err == nil && len(workflowCalls) > 0 {
-    // Display workflow proposal to user
-    proposal := formatWorkflowProposal(workflowCalls)
-    m.entries = append(m.entries, chatEntry{role: "assistant", content: proposal})
-    m.viewport.SetContent(m.renderMessages())
-    m.viewport.GotoBottom()
-    
-    // Wait for user confirmation
-    // Either explicit /confirm command OR auto-confirm for safe tools
-}
-```
+### Testing Verified
+- `read tool`: Successfully reads file contents
+- `write tool`: Successfully writes and reads back content
+- `list tool`: Successfully lists directory with `-la` format
+- `mkdir tool`: Successfully creates directories
+- `go build`: Compiles successfully with new tools present
 
 ---
 
-### 7. **UI Enhancements**
+## Bug Fix Attempts: Tool Command Parsing & Workflow Detection ❌⚠️
 
-#### New Styles (`internal/ui/styles.go`)
-```go
-var ClarificationStyle = lipgloss.NewStyle().
-    Foreground(lipgloss.Color("#ffb86c")).
-    Border(lipgloss.RoundedBorder()).
-    BorderForeground(lipgloss.Color("#ffb86c")).
-    Padding(0, 1)
+Despite multiple fix attempts, the LLM agent still responds with `<>` XML-style tags (like `<tool_call>`) instead of the expected `/tool` JSON format, and tool execution / workflow detection remain broken at runtime.
 
-var WorkflowProposalStyle = lipgloss.NewStyle().
-    Foreground(lipgloss.Color(colorTeal)).
-    Border(lipgloss.RoundedBorder()).
-    BorderForeground(lipgloss.Color(colorMuted)).
-    Padding(0, 1)
-```
+### What Was Tried
 
-#### New UI Elements (`internal/ui/model.go`)
-```go
-func (m Model) renderClarificationBox(state *ReactState) string
-func (m Model) renderWorkflowProposal(proposals []ToolCall) string
-```
+#### Fix Round 1 (System Prompt + <> Tag Fallbacks)
+1. **Updated `.system/system.md`** — Added explicit format instructions telling the LLM to use `/tool {"tool":"name","args":[...]}` for tool calls and `Step N:` for workflows. Instructed NOT to use `<>` tags.
+2. **Added `<>` tag parsing to `extractToolCommand()`** — Added regex fallbacks for `<tool>JSON</tool>`, `<tool name="..." />`, and `<tool>name</tool>` formats.
+3. **Added `<>` tag parsing to `parseWorkflowFromLLM()`** — Added regex fallbacks for `<workflow>`/`<plan>` wrappers and `<step>` tags (with or without wrappers).
+4. **Fixed `confirmWorkflowTool()` bug** — Was passing `item.Action` (description text like "Create project directory") as the tool name instead of the extracted tool name. Changed to use extracted `toolName`.
+5. **Added `ToolCmd` field to `TodoItem`** — Parser now captures `/tool` commands on lines immediately following a step line, so `executeWorkflowStep` can use them.
+6. **Cleaned up raw streamed response in `streamDoneMsg`** — When a workflow or tool command is detected, the raw streamed LLM response (with `<>` tags) is now removed from entries before showing clean output.
 
----
-
-### 8. **File Persistence for reAct Logs**
-
-```go
-func (m *Model) persistReactLogFile(state ReactState) error {
-    logEntry := map[string]interface{}{
-        "clarification_needed": state.ClarificationNeeded,
-        "missing_context": state.MissingContext,
-        "clarification_question": state.ClarificationQuestion,
-        "proposed_workflow": state.ProposedWorkflow,
-        "timestamp": state.Timestamp.Format("2006-01-02 15:04:05"),
-    }
-    
-    f, _ := os.OpenFile(fmt.Sprintf(".memory/react_logs/%s.log", m.sessionID),
-        os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    defer f.Close()
-    
-    data, _ := json.MarshalIndent(logEntry, "", "  ")
-    f.WriteString(fmt.Sprintf("%s\n", string(data)))
-    return nil
-}
-```
-
----
-
-## Implementation Steps
-
-### Step 1: Data Structures & Schema
-- [ ] Add `ReactState` and `ToolCall` structs to `internal/ui/model.go`
-- [ ] Add `ToolSchema` struct to `internal/agent/client.go`
-- [ ] Add `toolSchemas` variable to register available tools
-
-### Step 2: Redis Functions
-- [ ] Implement `saveReactState()`, `loadReactState()`, `clearReactState()`
-- [ ] Implement `saveWorkflowState()`, `loadWorkflowState()`
-- [ ] Test Redis persistence with existing chat history
-
-### Step 3: reAct Flow Core
-- [ ] Implement `parseClarificationResponse()` function
-- [ ] Implement `extractMissingContext()` function
-- [ ] Add clarification detection in `streamDoneMsg` case
-- [ ] Add auto-resume logic in `tea.KeyEnter` case
-
-### Step 4: File Persistence
-- [ ] Implement `persistReactLogFile()` function
-- [ ] Create `.memory/react_logs/` directory on startup
-- [ ] Implement workflow JSON log persistence
-
-### Step 5: Workflow Detection
-- [ ] Implement `parseWorkflowFromResponse()` function
-- [ ] Add JSON block extraction from text responses
-- [ ] Validate extracted tools against whitelist
-
-### Step 6: UI Enhancements
-- [ ] Add `ClarificationStyle` and `WorkflowProposalStyle` to `styles.go`
-- [ ] Implement `renderClarificationBox()` in `model.go`
-- [ ] Implement `renderWorkflowProposal()` in `model.go`
-- [ ] Update `renderMessages()` to display reAct state
-
-### Step 7: System Prompt Update
-- [ ] Update `.system/system.md` with reAct guidelines
-- [ ] Add clarification examples
-- [ ] Document workflow proposal behavior
-
-### Step 8: Testing & Verification
-- [ ] Test ambiguity detection with broad prompts
-- [ ] Test clarification flow end-to-end
-- [ ] Test auto-resume on user reply
-- [ ] Test Redis persistence across restarts
-- [ ] Test file log formatting
-
----
-
-## Key Design Decisions
-
-### Detection Strategy: LLM Self-Detect (Selected)
-**Why**: Leverages OpenRouter's reasoning capabilities without post-processing
-
-### Behavior: Save Partial Workflow State (Selected)
-**Why**: Preserves user intent during clarification, enables seamless resume
-
-### Flow: Auto-Resume on User Reply (Selected)
-**Why**: Eliminates manual confirmation steps, smooth UX
-
-### Hybrid Trigger Sources (Selected)
-- Skill-based tools via `trigger_tools` in `.md` files
-- OpenRouter function calling responses (if model supports)
-- Text-based JSON blocks in LLM responses
-- Explicit `/tool` commands (existing)
-
-### Workflow Execution: User Confirms First (Selected)
-**Why**: Safety-first approach, prevents unexpected actions
-
----
-
-## Files to Modify
-
-| File | Changes |
-|------|---------|
-| `.system/system.md` | Add reAct guidelines and clarification examples |
-| `internal/ui/model.go` | Add ReactState, workflow logic, reAct flow, file persistence |
-| `internal/ui/styles.go` | Add ClarificationStyle, WorkflowProposalStyle |
-| `internal/agent/client.go` | Add ToolSchema struct, tool registration |
-| `go.mod` | No changes needed (already has all dependencies) |
-
----
-
-## Testing Strategy
-
-### Unit Tests
-- `TestParseClarificationResponse()` - verify ambiguity detection
-- `TestExtractMissingContext()` - verify context extraction
-- `TestValidateWorkflowState()` - verify workflow validation
-
-### Integration Tests
-- `TestClarificationFlow()` - full clarification loop
-- `TestAutoResumeFlow()` - clarification → resume → execution
-- `TestReactStatePersistence()` - Redis load/save
-
-### E2E Tests
-- Type ambiguous prompt → verify clarification question
-- Provide clarification → verify workflow proposal
-- Confirm workflow → verify execution → verify logs
-
----
-
-## Future Enhancements
-
-1. **Skill-Specific Workflows**: Each skill could have predefined workflows in its `.md` file
-2. **Workflow Templates**: Pre-built workflow patterns for common tasks (e.g., "data analysis")
-3. **Workflow Versioning**: Track workflow changes over time
-4. **Shared Workflows**: Export/import workflows between sessions
-5. **Workflow Marketplace**: Community-contributed workflow templates
+#### Fix Round 2 (Brace Matching + <tool_call> Support)
+7. **Fixed JSON brace matching** — Replaced `strings.LastIndex(jsonPart, "}")` with a proper brace-depth counter (`findMatchingBrace`). The old code grabbed the LAST `}` in the string including stray/closing braces, causing `json.Unmarshal` to fail.
+8. **Added `<tool_call>` tag parsing** — The model `poolside/laguna-xs.2:free` outputs `<tool_call>` natively. Added support for:
+   - Format A: `<tool_call>shell\nargs":["ls","-la"]\n}` (partial JSON, missing `{`)
+   - Format B: `<tool_call>shell\n<arg_key>args</arg_key>\n<arg_value>["mkdir"]

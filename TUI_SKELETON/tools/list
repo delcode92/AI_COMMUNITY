@@ -1,0 +1,12 @@
+#!/bin/bash
+# List directory contents tool
+# Usage: list [directory]
+
+DIR="${1:-.}"
+
+if [ ! -d "$DIR" ]; then
+    echo "Error: Not a directory: $DIR" >&2
+    exit 1
+fi
+
+ls -la "$DIR"

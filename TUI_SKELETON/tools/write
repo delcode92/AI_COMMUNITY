@@ -1,0 +1,19 @@
+#!/bin/bash
+# Write to file tool
+# Usage: write <filepath> <content>
+
+FILE="$1"
+shift
+CONTENT="$*"
+
+if [ -z "$FILE" ]; then
+    echo "Error: No file path provided" >&2
+    echo "Usage: write <filepath> <content>" >&2
+    exit 1
+fi
+
+# Create parent directories if needed
+mkdir -p "$(dirname "$FILE")" 2>/dev/null
+
+echo "$CONTENT" > "$FILE"
+echo "Wrote to $FILE"

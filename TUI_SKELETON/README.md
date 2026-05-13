@@ -68,6 +68,14 @@ Execute tools with `/tool <json>`:
 /tool {"tool": "echo", "args": ["hello", "world"]}
 ```
 
+**File Tools:**
+```
+/tool {"tool": "read", "args": ["path/to/file.txt"]}
+/tool {"tool": "write", "args": ["path/to/file.txt", "content to write"]}
+/tool {"tool": "list", "args": ["."]}
+/tool {"tool": "mkdir", "args": ["path/to/directory"]}
+```
+
 Tools must be placed in the `tools/` directory and listed in the `TOOL_WHITELIST` environment variable (comma-separated). Default whitelist: `echo,time,date`.
 
 ### Compress Conversation

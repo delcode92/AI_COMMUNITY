@@ -1,0 +1,13 @@
+#!/bin/bash
+# Create directory tool
+# Usage: mkdir <directory>
+
+DIR="$1"
+
+if [ -z "$DIR" ]; then
+    echo "Error: No directory path provided" >&2
+    echo "Usage: mkdir <directory>" >&2
+    exit 1
+fi
+
+mkdir -p "$DIR" && echo "Created directory: $DIR"
