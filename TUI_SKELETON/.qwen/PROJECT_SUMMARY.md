@@ -1,98 +1,138 @@
-The user wants me to generate a comprehensive project summary in markdown format based on the entire conversation history. I need to extract the most important context, decisions, and progress that would be valuable for future sessions. Let me synthesize everything from the conversation.# Project Summary
+The user wants me to generate a comprehensive project summary in markdown format based on the entire conversation history. I need to synthesize all the important context, decisions, bugs fixed, architecture decisions, and progress into a well-structured document. Let me review the key information from the state snapshot, the bugs.txt analysis, the code fixes, and the state of the project.
+
+Key things to capture:
+1. Overall goal of the project
+2. The technology stack and architecture
+3. The 11 bugs that were fixed (7 original + 4 new)
+4. The 4-mode state machine
+5. The streaming architecture
+6. Tool execution workflow
+7. The recursive agent loop
+8. Files modified and their roles
+9. Current status and next steps
+10. Testing and build status
+
+Let me compose this comprehensively.# Project Summary
 
 ## Overall Goal
-Fix and enhance a Go-based Bubble Tea TUI chat agent so it reliably streams LLM responses, correctly detects and executes tool commands (including OpenAI-style function calls), renders bold markdown in output, blocks input during generation, and executes multi-step workflows through the full workflow → tool_confirm → runNextStep → tool execution → re-stream loop.
+Fix the TUI agent's streaming hang, invisible tool confirmation prompt, over-eager workflow creation, broken tool confirmation (value receiver + empty Enter), missing workflow mode flag, Enter key passthrough during streaming, inability to render bold markdown, and failure to detect OpenAI-style XML-wrapped tool calls — so the agent streams token-by-token, renders bold text, detects all tool call formats, and correctly executes tools through the full workflow/tool_confirm/runNextStep loop.
 
 ## Key Knowledge
 
 ### Technology Stack
-- **Language:** Go (module `aicommunity.omniq.my.id/cliagent`)
-- **TUI Framework:** Bubble Tea (`github.com/charmbracelet/bubbletea`)
-- **Styling:** Lipgloss (`github.com/charmbracelet/lipgloss`) — opencode-inspired dark theme
-- **API Client:** Custom OpenRouter streaming client (`internal/agent/client.go`)
-- **SDK Path:** Alternative SDK-based streaming via `internal/agent/sdk_agent.go` (activated via `USE_SDK=true`)
-- **Persistence:** Redis for conversation history; file-based `.memory/memory.md` for summaries
-- **Tools:** 8 whitelisted executables in `tools/`: `echo`, `time`, `date`, `read`, `write`, `list`, `mkdir`, `shell`
+- **Language**: Go (module `aicommunity.omniq.my.id/cliagent`)
+- **TUI Framework**: Bubble Tea (event loop, viewport, textarea components)
+- **Styling**: Lipgloss (opencode-inspired dark theme)
+- **Backend**: OpenRouter API (streaming HTTP `/chat/completions`)
+- **Persistence**: Redis (conversation history), local filesystem (`.memory/memory.md`)
+- **Tools**: 8 executable tools — `echo`, `time`, `date`, `read`, `write`, `list`, `mkdir`, `shell`
 
-### Architecture
-- **No explicit prompt queue.** User prompts are serialized via `m.mode` state machine (`""` → `"workflow"` → `"tool_confirm"` → `"clarify"`) and `m.streaming` boolean gate.
-- `m.history []agent.Message` is the single context buffer, replayed in full on every `startStream()` call.
-- `m.entries []chatEntry` is the UI display list, decoupled from history.
-- **Streaming** uses a channel-based one-shot command pattern: `readToken(ch)` returns a `tea.Cmd` that reads one message, and must be re-scheduled in the `streamTokenMsg` handler to create a read-loop.
+### Project Structure
+```
+internal/ui/model.go         — Main state machine: Update(), onStreamDone(), startStream(),
+                               runNextStep(), handleToolConfirm(), handleClarifyInput(),
+                               handleWorkflowConfirm(), readToken(), renderMessages(),
+                               updateView(), renderBoldMarkdown(), isToolLine(), regexpMatch()
+internal/ui/model_tools.go   — extractToolCommands() with 4 regex patterns; parseAndAddTool()
+internal/ui/model_sdk.go     — wrapSDKStream() for SDK-mode tool execution; startSDKStream()
+internal/ui/model_types.go   — Type definitions (tool interfaces, chatEntry, ReactState, todoItem)
+internal/ui/styles.go        — All Lipgloss style definitions including MessageBoldStyle
+internal/agent/client.go     — Raw HTTP streaming client (OpenRouter POST endpoint)
+internal/agent/sdk_agent.go  — SDKAgent wrapper with built-in tool calling support
+cmd/main.go                  — Application entry point
+```
 
-### State Machine Flow
+### Architecture: 4-Mode State Machine
+The agent operates in four modes stored in `m.mode`:
+
+| Mode | Value | Behavior on Enter |
+|------|-------|-------------------|
+| `""` (empty) | Normal chat | Sends user message to LLM via `startStream()` |
+| `"clarify"` | Clarification requested | Sends user's answer back to LLM via `startStream()` |
+| `"workflow"` | Multi-step plan proposed | Confirms/cancels workflow; confirmed steps execute via `runNextStep()` |
+| `"tool_confirm"` | Tool ready to execute | Runs tool via `handleToolConfirm()`, feeds result back to LLM |
+
+### Architecture: Streaming Loop
+`readToken()` → `streamTokenMsg` → `Update()` → `readToken()` is the streaming loop. Each token read from the channel triggers a re-schedule, creating a continuous read-loop that renders tokens to the terminal in real time.
+
+### Architecture: Recursive Function-Call Chain
 ```
-User Enter (normal mode)
-  → startStream() → readToken() → streamTokenMsg (re-schedule) → streamDoneMsg
-    → onStreamDone(response)
-      → 1. Clarification? → mode="clarify" → user input → re-stream
-      → 2. Workflow? (2+ steps AND ≥1 tool) → mode="workflow" → handleWorkflowConfirm
-      → 3. Standalone tool? → mode="tool_confirm" → handleToolConfirm → runNextStep
-      → 4. Fallthrough: normal completion, save to Redis
+onStreamDone() → mode change → user input → startStream() → onStreamDone()
+                                    ↓
+                           handleToolConfirm() → tool.Run() → append result to history
+                                    ↓
+                           runNextStep() or startStream() → sends enriched context to LLM
+                                    ↓
+                           onStreamDone() again (next step or final answer)
 ```
+
+### Bug Detection Priority Order in `onStreamDone()`
+1. Clarification requests (parseClarification)
+2. Workflows — strict: 2+ steps AND ≥1 tool call (parseWorkflow)
+3. Standalone tool calls — 4 regex patterns via extractToolCommands()
+
+### Tool Call Extraction — 4 Regex Patterns
+1. **Pattern 1**: `/tool {"tool":"name","args":[...]}` — explicit command
+2. **Pattern 2**: `{"tool":"name","args":[...]}` — bare JSON object
+3. **Pattern 3**: Markdown code block format (`> <tool {...}` or `>>>tool {...}`)
+4. **Pattern 4**: OpenAI-style XML-wrapped (`<toolname>{"command":"...","args":[...]}</toolname>`)
+
+`parseAndAddTool()` accepts both `"tool"` and `"command"` as the JSON key for tool name.
 
 ### Build & Test
-```bash
-go build -o tui-agent ./cmd/main.go
-go test ./...
-```
-All tests pass (10/10 in `internal/ui`). No test files in `cmd`, `agent`, `pkg/llm/openrouter`, or `pkg/tools`.
+- **Build**: `go build ./...` — passes cleanly (exit 0)
+- **Tests**: `go test ./...` — all tests pass (10/10 in `internal/ui`)
 
-### Environment Variables
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENROUTER_API_KEY` | Required API key | *(none)* |
-| `MODEL_NAME` | LLM model | `anthropic/claude-3.5-sonnet` |
-| `REDIS_URL` | Redis connection | `localhost:6379` |
-| `SESSION_ID` | Redis session ID | `default` |
-| `TOOL_WHITELIST` | Comma-separated allowed tools | `echo,time,date,shell` |
-| `USE_SDK` | Use SDK-based streaming | *(empty)* |
+## Recent Actions
 
-## Bugs Fixed (6 total)
+### Bugs Fixed (11 total — 7 original + 4 discovered during analysis)
 
 | # | Bug | Root Cause | Fix |
 |---|-----|-----------|-----|
-| 1 | Streaming hang | `readToken()` called once but never re-scheduled after processing each token | Return `readToken(m.streamCh)` in `streamTokenMsg` and `compressTokenMsg` handlers |
-| 2 | Invisible tool prompt | `applyManualTool()` sets mode and appends entry but never calls `m.updateView()` | Added `m.updateView()` after `applyManualTool()` in standalone tool branch of `onStreamDone` |
-| 3 | Over-eager workflow detection | `parseWorkflow()` matched any numbered/bullet list | Now requires 2+ steps AND at least one step with `ToolCmd != ""` |
-| 4 | Tool confirmation rejects empty Enter | `handleToolConfirm()` only matched literal `"y"/"yes"` | Added `input == ""` as auto-confirm, matching `handleWorkflowConfirm` behavior |
-| 5 | Tool confirmation value receiver | `handleToolConfirm` had `(m Model)` instead of `(m *Model)` | Changed to pointer receiver so mutations persist |
-| 6 | Workflow mode never set | `onStreamDone()` workflow branch never set `m.mode = "workflow"` | Added `m.mode = "workflow"` so `KeyEnter` routes to `handleWorkflowConfirm` |
+| 1 | Streaming hang | `readToken()` called once but never re-scheduled | Return `readToken(m.streamCh)` inside `streamTokenMsg` case |
+| 2 | Invisible tool prompt | `applyManualTool()` never called `m.updateView()` | Added `m.updateView()` after `applyManualTool()` in `onStreamDone()` |
+| 3 | Over-eager workflow | `parseWorkflow` matched any numbered list | Now requires 2+ steps AND at least one tool call |
+| 4 | Tool confirm empty Enter | `handleToolConfirm` only matched `"y"/"yes"` | Empty input `""` now treated as auto-confirm |
+| 5 | Value receiver mutation | `handleToolConfirm` was `(m Model)` — value receiver | Changed to `(m *Model)` — pointer receiver |
+| 6 | Missing workflow mode | `onStreamDone` never set `m.mode = "workflow"` | Added `m.mode = "workflow"` in workflow branch |
+| 7 | Enter key passthrough | `break` fell through to textarea during streaming | Changed to `return m, nil` to fully block input |
+| 8 | `stepIndex` never advanced | `handleToolConfirm` never incremented `stepIndex` before `runNextStep()` | Added `m.stepIndex++` when `len(m.pendingTodos) > 0` |
+| 9 | Empty Enter ignored by modes | Empty-input guard placed before mode routing | Moved mode checks before empty-input guard |
+| 10 | `isToolLine` blind to XML | Only checked `/tool` and `{"tool":` | Added `{"command":` check and regexpMatch for `<toolname>{` pattern |
+| 11 | Only first tool processed | `onStreamDone` only passed `tools[0]` | Multiple tools now queued as `pendingTodos` through workflow machinery |
 
-## Recent Changes
+### Features Added
+- **Bold markdown rendering**: `renderBoldMarkdown()` parses `**text**` and renders with `MessageBoldStyle` (Bold: true)
+- **OpenAI-style XML tool extraction**: `<toolname>{command,args}</toolname>` format detected and parsed
+- **Multi-tool sequential execution**: Multiple detected tools are queued and executed one-by-one with user confirmation per step
+- **`regexpMatch` helper**: Small utility function for regex matching in `isToolLine()`
 
-### Blocking Enter During Streaming
-Changed `break` to `return m, nil` in the `KeyEnter` handler when `m.streaming == true`, fully consuming the event so no input reaches the textarea or falls through to UI updates.
-
-### Bold Markdown Rendering
-- Added `MessageBoldStyle` in `internal/ui/styles.go` (same text color, `Bold(true)`)
-- Added `renderBoldMarkdown()` function in `model.go` that iterates through text, finds `**...**` pairs, and renders bold sections with `MessageBoldStyle`
-- Updated `renderMessages()` to use `renderBoldMarkdown()` for assistant content instead of plain `MessageStyle`
-
-### OpenAI-Style Tool Call Extraction
-- **Problem:** Agent responses contain `<shell>{"command":"ls","args":["-la"]}</shell>` format, which no existing regex matched
-- **Fix in `model_tools.go`:** Added Pattern 4 regex `<(\w+)>\s*(\{[^}]+\})\s*</\w+>` that extracts the XML tag as tool name and parses inner JSON's `command` + `args` fields
-- `parseAndAddTool()` updated to accept `command` as alias for `tool` in JSON
-- **Cleanup:** Removed duplicate `extractToolCommands` and `parseToolJSON` functions from `model.go`; authoritative implementations now only in `model_tools.go`
-- Removed unused `regexp` import from `model.go`
-
-### Debug Handler Removed
-Removed `case tea.KeyRunes:` handler (pressing `d` to add `"debug keypress"` to status bar) — pure development aid with no functional purpose.
+### Code Cleanup
+- Removed duplicate `extractToolCommands`/`parseToolJSON` from `model.go`
+- Removed unused `regexp` import from `model.go` (re-added later for new helper)
+- Removed debug `KeyRunes` handler for `'d'` keypress
 
 ## Current Plan
-1. [x] Fix streaming hang — re-schedule readToken after each token
-2. [x] Fix invisible tool prompt — add updateView() after applyManualTool
-3. [x] Fix over-eager workflow detection — require 2+ steps AND ≥1 tool
-4. [x] Fix tool confirmation — accept empty Enter, pointer receiver
-5. [x] Fix missing workflow mode — set m.mode = "workflow"
-6. [x] Block Enter during streaming — return m, nil instead of break
-7. [x] Bold markdown rendering — MessageBoldStyle + renderBoldMarkdown()
-8. [x] OpenAI-style tool call extraction — XML-wrapped pattern + command alias
-9. [x] Build verification — clean compile
-10. [x] Test verification — all 10 tests pass
-11. [TODO] User to rebuild binary (`go build -o tui-agent ./cmd/main.go`) and test end-to-end
+
+1. [DONE] Fix streaming hang — re-schedule `readToken` after each token
+2. [DONE] Fix invisible tool prompt — add `updateView()` after `applyManualTool`
+3. [DONE] Fix over-eager workflow detection — require 2+ steps AND ≥1 tool
+4. [DONE] Fix tool confirmation — accept empty Enter, change to pointer receiver
+5. [DONE] Fix missing workflow mode — set `m.mode = "workflow"` in workflow branch
+6. [DONE] Fix Enter key passthrough — `return m, nil` during streaming
+7. [DONE] Add bold markdown rendering — `**text**` renders bold in TUI
+8. [DONE] Add OpenAI-style XML tool call extraction — `<toolname>{...}</toolname>` pattern
+9. [DONE] Fix `stepIndex` advancement — increment before `runNextStep()` in workflow
+10. [DONE] Fix empty Enter routing — move mode checks before empty-input guard
+11. [DONE] Fix multi-tool processing — queue all tools via workflow machinery
+12. [DONE] Remove duplicate code and clean up `model.go`
+13. [DONE] Update `note.md` — document all 11 bugs, 4 new features, architecture
+14. [DONE] Build verification — `go build ./...` passes cleanly
+15. [DONE] Test verification — all 10 tests pass
+16. [TODO] End-to-end testing — rebuild binary and test with a live OpenRouter API session
+17. [TODO] Add regression tests for the 4 new bug fixes (stepIndex, empty Enter routing, XML detection, multi-tool)
 
 ---
 
 ## Summary Metadata
-**Update time**: 2026-05-13T10:27:03.410Z 
+**Update time**: 2026-05-13T12:05:53.507Z 

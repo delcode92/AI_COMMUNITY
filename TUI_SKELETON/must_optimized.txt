@@ -1,0 +1,51 @@
+# Must Optimize — Problems & Why
+
+## 1. Workflow detection is overcomplicated
+
+**What:** `extractStepAction()` has 3 nested loops checking "Step N:", "N.", bullet points, case-insensitive variants — all doing the same thing in different ways.
+
+**Why:** A single regex `(?i)^(?:step\s+\d+:|^\d+\.)\s*(.*)` replaces all that complexity. Simpler code = fewer bugs, easier to read.
+
+---
+
+## 2. Tools in workflow silently skipped (BIG BUG)
+
+**What:** `parseWorkflow()` stores the raw tool line as `ToolCmd` (e.g. `/tool {"tool":"read","args":["file.txt"]}`). Then `runNextStep()` tries `json.Unmarshal([]byte(todo.ToolCmd), ...)` — but `/tool ` prefix makes it invalid JSON. Unmarshal fails silently, tool never runs, stepIndex advances, user sees nothing.
+
+**Why:** Two code paths disagree on format. `parseWorkflow` stores raw LLM output. `runNextStep` expects clean JSON. Fix: strip `/tool ` prefix before storing, or use `extractToolCommands()` to parse the tool line properly.
+
+---
+
+## 3. Silent failures in runNextStep
+
+**What:** If `json.Unmarshal` fails OR `findToolByName` returns nil, the step is silently skipped — no error message, no user feedback.
+
+**Why:** User thinks the tool ran but nothing happened. Add error logging to entries so user knows why a step was skipped.
+
+---
+
+## 4. parseWorkflow only checks next line for tools
+
+**What:** `parseWorkflow` only looks at `i+1` for tool lines. If LLM puts tool on same line as step, or separated by blank line, or in a code block — it's missed.
+
+**Why:** LLM output varies. Use `extractToolCommands()` (which already handles 4 formats) on the full response instead of checking one line ahead.
+
+---
+
+## 5. formatArgsForJSON splits args incorrectly
+
+**What:** `strings.Fields(args)` splits on any whitespace. A single arg like `"hello world"` becomes two args `["hello", "world"]`.
+
+**Why:** Breaks tools that need multi-word arguments. Use proper JSON marshaling instead.
+
+---
+
+## Summary
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 1 | extractStepAction too complex | Replace with single regex |
+| 2 | ToolCmd format mismatch → tools silently skipped | Strip `/tool` prefix or use extractToolCommands |
+| 3 | Silent failures in runNextStep | Add error messages to entries |
+| 4 | parseWorkflow only checks i+1 for tools | Use extractToolCommands on full response |
+| 5 | formatArgsForJSON splits args wrong | Use proper JSON marshaling |

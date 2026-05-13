@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -226,9 +227,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			input := strings.TrimSpace(m.textarea.Value())
-			if input == "" {
-				break
-			}
 
 			if m.mode == "clarify" {
 				return m.handleClarifyInput(input)
@@ -238,6 +236,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.mode == "tool_confirm" {
 				return m.handleToolConfirm(input)
+			}
+
+			if input == "" {
+				break
 			}
 
 			m.textarea.Reset()
@@ -372,6 +374,7 @@ func (m *Model) handleToolConfirm(input string) (tea.Model, tea.Cmd) {
 		_ = m.saveHistory()
 		// If in workflow, continue to next step
 		if len(m.pendingTodos) > 0 {
+			m.stepIndex++
 			return m, m.runNextStep()
 		}
 		// Standalone tool: re-trigger LLM
@@ -524,7 +527,8 @@ func (m *Model) onStreamDone(response string) {
 	// 2. Check for workflow (multi-step plan with at least one tool call)
 	//    parseWorkflow is strict: requires 2+ steps AND at least one tool.
 	//    Casual numbered lists return nil and fall through.
-	if todos := parseWorkflow(response); len(todos) > 0 {
+	detectedTools := m.extractToolCommands(response)
+	if todos := parseWorkflow(response, detectedTools); len(todos) > 0 {
 		m.mode = "workflow"
 		m.pendingTodos = todos
 		m.stepIndex = 0
@@ -536,7 +540,21 @@ func (m *Model) onStreamDone(response string) {
 	// 3. Check for explicit standalone tool commands (not part of a workflow)
 	if tools := m.extractToolCommands(response); len(tools) > 0 {
 		m.pendingTodos = nil
-		m.applyManualTool(fmt.Sprintf(`/tool {"tool":"%s","args":[%s]}`, tools[0].name, formatArgsForJSON(tools[0].args)))
+		if len(tools) == 1 {
+			m.applyManualTool(fmt.Sprintf(`/tool {"tool":"%s","args":[%s]}`, tools[0].name, formatArgsForJSON(tools[0].args)))
+			m.updateView()
+			return
+		}
+		// Multiple tools: queue all and process sequentially via workflow machinery
+		for _, t := range tools {
+			m.pendingTodos = append(m.pendingTodos, todoItem{
+				Action: fmt.Sprintf("Execute tool %s with args %s", t.name, t.args),
+				ToolCmd: fmt.Sprintf(`{"tool":"%s","args":[%s]}`, t.name, formatArgsForJSON(t.args)),
+			})
+		}
+		m.stepIndex = 0
+		m.mode = "workflow"
+		m.entries = append(m.entries, chatEntry{role: "assistant", content: formatTodoList(m.pendingTodos)})
 		m.updateView()
 		return
 	}
@@ -544,11 +562,8 @@ func (m *Model) onStreamDone(response string) {
 
 func formatArgsForJSON(args string) string {
 	parts := strings.Fields(args)
-	quoted := make([]string, len(parts))
-	for i, p := range parts {
-		quoted[i] = fmt.Sprintf(`"%s"`, p)
-	}
-	return strings.Join(quoted, ",")
+	b, _ := json.Marshal(parts)
+	return string(b[1 : len(b)-1])
 }
 
 // ── Workflow execution ──────────────────────────────────────────────────────
@@ -574,7 +589,10 @@ func (m *Model) runNextStep() tea.Cmd {
 			Tool string   `json:"tool"`
 			Args []string `json:"args"`
 		}
-		if err := json.Unmarshal([]byte(todo.ToolCmd), &req); err == nil {
+		if err := json.Unmarshal([]byte(todo.ToolCmd), &req); err != nil {
+			m.entries = append(m.entries, chatEntry{role: "assistant", content: fmt.Sprintf("Tool parse error: %v", err)})
+			m.addDebug(fmt.Sprintf("tool JSON parse failed: %v", err))
+		} else {
 			m.mode = "tool_confirm"
 			m.pendingTool = findToolByName(req.Tool)
 			m.pendingArgs = strings.Join(req.Args, " ")
@@ -583,7 +601,10 @@ func (m *Model) runNextStep() tea.Cmd {
 				m.updateView()
 				return nil
 			}
+			m.entries = append(m.entries, chatEntry{role: "assistant", content: fmt.Sprintf("Unknown tool: %s", req.Tool)})
+			m.addDebug(fmt.Sprintf("tool not found: %s", req.Tool))
 		}
+		m.updateView()
 	}
 
 	m.stepIndex++
@@ -926,22 +947,26 @@ func extractMissingContext(response string) []string {
 // Only returns a workflow when there are 2+ steps AND at least one step
 // involves a tool call. Casual numbered lists are ignored so the agent
 // answers directly instead of prompting for workflow confirmation.
-func parseWorkflow(input string) []todoItem {
+func parseWorkflow(input string, detectedTools []pendingTool) []todoItem {
 	var todos []todoItem
 	lines := strings.Split(input, "\n")
+
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
 		action := extractStepAction(line)
 		if action == "" {
 			continue
 		}
-		toolCmd := ""
-		if i+1 < len(lines) && isToolLine(strings.TrimSpace(lines[i+1])) {
-			toolCmd = strings.TrimSpace(lines[i+1])
-			i++
-		}
-		todos = append(todos, todoItem{Action: action, ToolCmd: toolCmd})
+		todos = append(todos, todoItem{Action: action, ToolCmd: ""})
 	}
+
+	// Assign detected tools to steps in order (one tool per step)
+	for i, tool := range detectedTools {
+		if i < len(todos) {
+			todos[i].ToolCmd = fmt.Sprintf(`{"tool":"%s","args":[%s]}`, tool.name, formatArgsForJSON(tool.args))
+		}
+	}
+
 	if len(todos) < 2 {
 		return nil
 	}
@@ -960,53 +985,27 @@ func parseWorkflow(input string) []todoItem {
 
 // extractStepAction detects step lines by common patterns and extracts the action.
 func extractStepAction(line string) string {
-	// Match "Step N:" or "N." prefixes
-	lower := strings.ToLower(line)
-	for _, prefix := range []string{"step ", ""} {
-		for n := 1; n <= 20; n++ {
-			p := fmt.Sprintf("step %d:", n)
-			if strings.HasPrefix(lower, p) {
-				action := strings.TrimSpace(strings.TrimPrefix(line, fmt.Sprintf("Step %d:", n)))
-				if action == "" {
-					return line
-				}
-				return action
-			}
-			alt := fmt.Sprintf("%d.", n)
-			if strings.HasPrefix(line, alt) {
-				action := strings.TrimSpace(strings.TrimPrefix(line, alt))
-				if action == "" {
-					return line
-				}
-				return action
-			}
-		}
-		_ = prefix // avoid unused var
-		break
-	}
-	// Also try direct "Step N:" case-insensitive
-	stepIdx := strings.ToLower(line)
-	if idx := strings.Index(stepIdx, "step "); idx >= 0 {
-		rest := line[idx+5:]
-		for n := 1; n <= 20; n++ {
-			num := fmt.Sprintf("%d:", n)
-			if strings.HasPrefix(rest, num) {
-				action := strings.TrimSpace(rest[len(num):])
-				if action == "" {
-					return line
-				}
-				return action
-			}
-		}
-	}
-	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") || strings.HasPrefix(line, "• ") {
-		return strings.TrimSpace(line[2:])
+	re := regexp.MustCompile(`(?i)^(?:step\s+\d+:\s*|^\d+\.\s*|[-*•]\s+)(.*)`)
+	match := re.FindStringSubmatch(line)
+	if len(match) > 1 {
+		return strings.TrimSpace(match[1])
 	}
 	return ""
 }
 
 func isToolLine(line string) bool {
-	return strings.HasPrefix(line, "/tool") || strings.Contains(line, `{"tool":`)
+	return strings.HasPrefix(line, "/tool") ||
+		strings.Contains(line, `{"tool":`) ||
+		strings.Contains(line, `{"command":`) ||
+		regexpMatch(`<\w+>\s*\{`, line)
+}
+
+func regexpMatch(pattern, s string) bool {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(s)
 }
 
 func formatTodoList(todos []todoItem) string {
@@ -1040,7 +1039,8 @@ func ExecuteTool(name string, args []string) (string, error) {
 
 // parseWorkflowFromLLM calls parseWorkflow and returns a pointer.
 func (m *Model) parseWorkflowFromLLM(input string) *[]todoItem {
-	todos := parseWorkflow(input)
+	detectedTools := m.extractToolCommands(input)
+	todos := parseWorkflow(input, detectedTools)
 	if len(todos) == 0 {
 		return nil
 	}
