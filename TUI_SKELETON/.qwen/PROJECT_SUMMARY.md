@@ -1,88 +1,106 @@
-The user wants me to generate a comprehensive project summary in markdown format based on the entire conversation history. I need to synthesize all the important context — the project architecture, the bugs found and fixed, the decisions made, and the current state of the project. Let me organize this carefully.
+The user is asking me to generate a comprehensive project summary in markdown format based on the entire conversation history. Let me analyze all the context provided:
 
-Key things to capture:
-1. Project overview and goal
-2. Tech stack and architecture
-3. The two bugs discovered and fixed today (streaming read loop, viewport not updating after tool detection)
-4. The streaming fix (readToken pattern)
-5. The tool confirmation fix (missing updateView)
-6. Testing status
-7. Current state and next steps# Project Summary
+1. The project is **tui-agent** - a TUI chat application built with Bubble Tea (Go) that connects to OpenRouter for LLM streaming
+2. There have been multiple bug fixes discussed across turns:
+   - Bug 1: Streaming hang (readToken not re-scheduled)
+   - Bug 2: Invisible tool confirmation prompt (missing updateView after applyManualTool)
+   - Bug 3: Over-eager workflow detection (parseWorkflow too greedy)
+   - Bug 4: Tool confirmation not accepting empty Enter
+   - Bug 5: handleToolConfirm had value receiver instead of pointer receiver
+   - Bug 6 (latest): m.mode never set to "workflow" in onStreamDone, breaking the entire workflow/tool execution chain
+
+3. The project structure, tech stack, architecture, and development procedures are all documented in the QWEN.md context.
+
+4. The most recent fix was adding `m.mode = "workflow"` in onStreamDone() which was the critical missing piece preventing tool execution from working end-to-end.
+
+Let me compose a thorough project summary that captures all of this context for future sessions.# Project Summary
 
 ## Overall Goal
-Build a fully functional TUI-based AI chat agent using Bubble Tea (Go) that streams LLM responses from OpenRouter, supports tool execution, skill switching, conversation persistence via Redis, and a reAct-style clarification/workflow system.
+Fix the TUI agent's streaming hang, invisible tool confirmation prompt, over-eager workflow creation, non-functional tool execution, and broken workflow state machine — so the agent streams token-by-token, correctly detects and confirms multi-step workflows with tool calls, and executes those tools end-to-end.
 
 ## Key Knowledge
 
 ### Technology Stack
-- **Language:** Go (module: `aicommunity.omniq.my.id/cliagent`)
-- **TUI Framework:** Bubble Tea + Lipgloss (opencode-inspired dark theme)
-- **AI Backend:** OpenRouter API (streaming chat completions)
-- **Persistence:** Redis (session history, reAct state) and local filesystem (`.memory/memory.md`)
-- **Tool System:** Executable binaries in `tools/` directory, whitelisted via `TOOL_WHITELIST` env var
-- **Optional SDK:** `agent-sdk-go` for advanced tool-calling orchestration (`USE_SDK=true`)
-- **Config:** `.env` via `godotenv`, skills as `.md` files in `skills/`
+- **Language**: Go (module `aicommunity.omniq.my.id/cliagent`)
+- **TUI Framework**: Bubble Tea (event loop, components, `tea.Cmd` pattern)
+- **Styling**: Lipgloss (opencode-inspired dark theme)
+- **Backend**: OpenRouter API for streaming LLM responses
+- **Persistence**: Redis for conversation history; `.memory/memory.md` for compressed summaries
+- **Config**: `.env` via GoDotEnv; environment variables for API key, model, Redis URL, session ID, tool whitelist
+- **Tools**: 8 executable tools — `echo`, `time`, `date`, `read`, `write`, `list`, `mkdir`, `shell`
 
-### Architecture
-- **Entry:** `cmd/main.go` → creates Bubble Tea program with `ui.New()`
-- **Core Model:** `internal/ui/model.go` — Bubble Tea `Model` with viewport, textarea, streaming state, reAct modes
-- **API Client:** `internal/agent/client.go` — HTTP POST to OpenRouter with `bufio.Scanner` for SSE streaming
-- **SDK Agent:** `internal/agent/sdk_agent.go` — wraps `agent-sdk-go` for structured tool-calling orchestration
-- **Tool Registry:** `internal/ui/model_types.go` — `ToolRunner` interface, `findToolByName()` lookup, 8 built-in tools (echo, time, date, read, write, list, mkdir, shell)
-- **Skill System:** `internal/skill/loader.go` — parses `skills/*.md` for `name:`, `description:`, `system_prompt: |`
-- **UI Components:** Bubble Tea viewport (conversation), textarea (input), status bar (model name, streaming indicator, debug)
+### Architecture & Data Flow
+1. User types message → `textarea.Update()` captures input
+2. On Enter → message appended to `history`, `startStream()` called
+3. `startStream()` → `send()` → OpenRouter streaming API → returns channel
+4. `readToken(ch)` returned as `tea.Cmd` → fires `streamTokenMsg` for each token
+5. Each `streamTokenMsg` processed → token appended to buffer, viewport updated, **`readToken` re-scheduled** (critical read-loop)
+6. On channel close → `streamDoneMsg` fires → `onStreamDone()` called with full response
+7. `onStreamDone()` runs the decision cascade: clarification → workflow → standalone tool → done
 
-### Key Design Decisions
-- Global system prompt loaded from `.system/system.md` and injected as first `role:"system"` message
-- Skill switching via `/skill <name>` filters system prompts, keeping the global prompt
-- `/compress` summarizes conversation via LLM and appends to `.memory/memory.md`
-- reAct detection: looks for clarification marker phrases and numbered/ bulleted workflows in LLM output
-- Tool execution requires explicit user confirmation ("Execute tool X? (y/n)") — applies to both manual `/tool` calls and workflow steps
-- All conversation history persisted to Redis key `session:{id}:history`
+### Critical Bug Fixes (Cumulative)
 
-### Build & Test Commands
-- `go mod tidy` — install dependencies
-- `go build ./...` — build entire project
-- `go test ./internal/ui/ -v -count=1 -timeout 30s` — run UI package tests (all passing)
-- `go run ./cmd/main.go` — launch the application
+| # | Bug | Root Cause | Fix |
+|---|-----|-----------|-----|
+| 1 | Streaming hangs on "generating..." forever | `readToken()` called once in `startStream()` but never re-scheduled after each token | Return `readToken(m.streamCh)` / `readCompressToken(m.compressCh)` inside `streamTokenMsg` and `compressTokenMsg` cases to create a re-scheduling read-loop |
+| 2 | Tool confirmation prompt invisible | `applyManualTool()` sets mode and appends confirmation entry, but `onStreamDone()` never calls `m.updateView()` to render it | Added `m.updateView()` after `applyManualTool()` in standalone tool branch |
+| 3 | Every response triggers workflow creation | `parseWorkflow()` matched any numbered list or bullet list | Added guard requiring 2+ steps AND at least one step with `t.ToolCmd != ""`; casual lists now fall through |
+| 4 | Tool confirmation rejects empty Enter | `handleToolConfirm()` only matched literal `"y"` / `"yes"` | Added `input == ""` as auto-confirm, matching `handleWorkflowConfirm` behavior |
+| 5 | Tool confirmation mutations lost | `handleToolConfirm` had **value receiver** `(m Model)` — all state changes discarded on return | Changed to **pointer receiver** `(m *Model)` |
+| 6 | Workflow + tools completely non-functional | `onStreamDone()` never set `m.mode` after detecting a workflow, so `KeyEnter` handler never routed to `handleWorkflowConfirm()` | Added `m.mode = "workflow"` before `updateView()` in the workflow branch |
 
-### Environment Variables
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | *(required)* | API key for OpenRouter |
-| `MODEL_NAME` | `anthropic/claude-3.5-sonnet` | LLM model selection |
-| `REDIS_URL` | `localhost:6379` | Redis connection |
-| `SESSION_ID` | `default` | Redis session key namespace |
-| `TOOL_WHITELIST` | `echo,time,date,shell` | Allowed tool names |
-| `USE_SDK` | *(empty/false)* | Enable `agent-sdk-go` orchestration mode |
+### Decision Points
+- **Priority order in `onStreamDone()`**: clarification → workflow (strict) → standalone tool commands. Workflow checked before standalone tools because a response can contain both.
+- **`parseWorkflow()` strictness**: Requires 2+ steps AND at least one tool call. This prevents casual numbered lists from being treated as workflows.
+- **Tool execution requires confirmation**: Both manual (`/tool`) and workflow-derived tool calls go through a `tool_confirm` mode with `(y/n)` prompt. Empty Enter = yes.
+- **Workflow execution is recursive**: `onStreamDone` → `runNextStep` → tool confirm → execute tool → append result to history → `startStream()` with enriched context → `onStreamDone` again until all steps complete.
+
+### Two Code Paths for Streaming
+- **Direct HTTP**: `client.go` — `client.Send()` returns a goroutine-based channel
+- **SDK-based**: `sdk_agent.go` + `wrapSDKStream()` — wraps SDK stream into same channel interface
+- Controlled by `USE_SDK` environment variable
+
+### State Machine Modes
+The `mode` field on `Model` drives the conversation flow:
+- `""` (empty) — normal chat
+- `"workflow"` — awaiting user confirmation of multi-step plan
+- `"tool_confirm"` — awaiting user confirmation of a single tool execution
+- `"clarify"` — awaiting user clarification on ambiguous input
+
+### Key Code Locations
+- `internal/ui/model.go` — Main Bubble Tea model; all Update/View logic, streaming, workflow parsing, tool execution
+- `internal/ui/model_types.go` — Type definitions: `ToolRunner`, `sdkTool`, `todoItem`, `ReactState`, tool list
+- `internal/ui/model_tools_test.go` — Tests for `extractToolCommands` and `parseWorkflowFromLLM`
+- `internal/agent/client.go` — OpenRouter HTTP streaming client
+- `internal/agent/sdk_agent.go` — SDK-based agent (if `USE_SDK=true`)
+- `internal/skill/loader.go` — Skill `.md` file parser
+- `cmd/main.go` — Application entry point
+
+## File System State
+- **Modified**: `internal/ui/model.go` (6 fixes), `internal/ui/model_tools_test.go` (1 test expectation updated)
+- **Unchanged**: All other files (`client.go`, `sdk_agent.go`, `model_types.go`, `model_sdk.go`, etc.)
+- **Build**: `go build ./...` passes cleanly (exit 0)
+- **Tests**: `go test ./...` — all 10 tests in `internal/ui` pass
 
 ## Recent Actions
-
-### Bug #1 — Streaming "generating…" hang (FIXED)
-- **Root cause:** `readToken()` reads exactly one message from the stream channel and returns. The `streamTokenMsg` handler in `Update()` consumed that single token but never scheduled another read. After the first token, the channel sat unread forever — Bubble Tea's event loop had no pending command to trigger the next read.
-- **Fix:** Made `streamTokenMsg` and `compressTokenMsg` cases return `readToken(m.streamCh)` / `readCompressToken(m.compressCh)` respectively, creating a recursive read-loop that drains the channel until `streamDoneMsg` arrives. This is the standard Bubble Tea pattern for streaming commands.
-- **Files changed:** `internal/ui/model.go` (lines ~290-303)
-
-### Bug #2 — Tool confirmation prompt invisible (FIXED)
-- **Root cause:** When `onStreamDone()` detects a `/tool` JSON command in the LLM response, it calls `applyManualTool()` which sets `mode = "tool_confirm"` and appends a confirmation prompt entry — but never calls `updateView()`. The viewport kept showing the old streamed content (raw JSON), so the user never saw the "Execute tool X? (y/n)" prompt and the interaction appeared stuck.
-- **Fix:** Added `m.updateView()` call after `applyManualTool()` in the tool-detection branch of `onStreamDone()`, consistent with how both the `clarify` and `workflow` branches already refresh the viewport.
-- **Files changed:** `internal/ui/model.go` (line ~542)
-
-### Test Results
-- All 8 existing tests pass cleanly: `TestLoadGlobalPrompt`, `TestExecuteTool`, `TestModelNew`, `TestDebugMsg`, and 5 sub-tests under `TestExtractToolCommands` + `TestParseWorkflowFromLLM`.
+1. Fixed streaming hang by re-scheduling `readToken` after each token (read-loop)
+2. Fixed invisible tool prompt by adding `m.updateView()` after `applyManualTool` in standalone branch
+3. Fixed over-eager workflow detection — `parseWorkflow()` now requires 2+ steps AND at least one tool call
+4. Fixed tool confirmation — accepts empty Enter as auto-confirm, changed from value receiver to pointer receiver
+5. Fixed workflow mode — added `m.mode = "workflow"` in `onStreamDone()` so the state machine correctly routes Enter key to `handleWorkflowConfirm()`
+6. Verified all builds and tests pass
 
 ## Current Plan
-
-1. [DONE] Fix streaming read-loop — `streamTokenMsg` now reschedules `readToken`
-2. [DONE] Fix invisible tool prompt — `onStreamDone` now calls `updateView()` after tool detection
-3. [DONE] Build verification passes
-4. [DONE] All existing tests pass
-5. [TODO] Manual integration testing — run the TUI, send a message that triggers a tool call, confirm the confirmation prompt appears and tool executes
-6. [TODO] Test the `USE_SDK=true` path with `wrapSDKStream` to ensure SDK-based tool orchestration also works with the streaming fix
-7. [TODO] Consider adding automated integration tests that exercise the full streaming → tool confirmation → execution flow
-8. [TODO] Review error handling in `client.go` — failed API calls close the channel without sending `streamDoneMsg`, which could leave the UI in a `streaming=true` state
+1. [DONE] Fix streaming hang — re-schedule `readToken` after each token
+2. [DONE] Fix invisible tool prompt — add `updateView()` after `applyManualTool`
+3. [DONE] Fix over-eager workflow detection — require 2+ steps AND at least one tool
+4. [DONE] Fix tool confirmation — accept empty Enter, pointer receiver
+5. [DONE] Fix workflow mode flag — add `m.mode = "workflow"` in `onStreamDone()`
+6. [DONE] Build verification — clean compile
+7. [DONE] Test verification — all 10 tests pass
+8. [TODO] User to rebuild binary (`go build -o tui-agent ./cmd/main.go`) and test end-to-end with actual LLM calls
 
 ---
 
 ## Summary Metadata
-**Update time**: 2026-05-12T23:34:17.669Z 
+**Update time**: 2026-05-13T08:40:10.733Z 

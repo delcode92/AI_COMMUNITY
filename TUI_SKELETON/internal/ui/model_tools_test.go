@@ -109,12 +109,10 @@ Step 2: Write a file
 			wantLen:  0,
 		},
 		{
-			name: "steps without tools",
+			name: "steps without tools - no workflow (plain list)",
 			input: `Step 1: Do something
 Step 2: Do another thing`,
-			wantLen:  2,
-			wantStep: 1,
-			wantAct:  "Do another thing",
+			wantLen:  0,
 		},
 	}
 

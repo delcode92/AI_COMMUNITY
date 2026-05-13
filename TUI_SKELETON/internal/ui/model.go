@@ -357,9 +357,9 @@ func (m Model) handleWorkflowConfirm(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleToolConfirm(input string) (tea.Model, tea.Cmd) {
+func (m *Model) handleToolConfirm(input string) (tea.Model, tea.Cmd) {
 	lower := strings.ToLower(input)
-	if lower == "y" || lower == "yes" {
+	if lower == "y" || lower == "yes" || input == "" {
 		m.mode = ""
 		if m.pendingTool == nil {
 			return m, nil
@@ -527,8 +527,11 @@ func (m *Model) onStreamDone(response string) {
 	}
 	_ = m.clearReactState()
 
-	// 2. Check for workflow
+	// 2. Check for workflow (multi-step plan with at least one tool call)
+	//    parseWorkflow is strict: requires 2+ steps AND at least one tool.
+	//    Casual numbered lists return nil and fall through.
 	if todos := parseWorkflow(response); len(todos) > 0 {
+		m.mode = "workflow"
 		m.pendingTodos = todos
 		m.stepIndex = 0
 		m.entries = append(m.entries, chatEntry{role: "assistant", content: formatTodoList(todos)})
@@ -536,7 +539,7 @@ func (m *Model) onStreamDone(response string) {
 		return
 	}
 
-	// 3. Check for tool commands
+	// 3. Check for explicit standalone tool commands (not part of a workflow)
 	if tools := extractToolCommands(response); len(tools) > 0 {
 		m.pendingTodos = nil
 		m.applyManualTool(fmt.Sprintf(`/tool {"tool":"%s","args":[%s]}`, tools[0].name, formatArgsForJSON(tools[0].args)))
@@ -899,6 +902,9 @@ func extractMissingContext(response string) []string {
 // ── Workflow parsing ────────────────────────────────────────────────────────
 
 // parseWorkflow extracts a todo list from LLM output.
+// Only returns a workflow when there are 2+ steps AND at least one step
+// involves a tool call. Casual numbered lists are ignored so the agent
+// answers directly instead of prompting for workflow confirmation.
 func parseWorkflow(input string) []todoItem {
 	var todos []todoItem
 	lines := strings.Split(input, "\n")
@@ -915,10 +921,20 @@ func parseWorkflow(input string) []todoItem {
 		}
 		todos = append(todos, todoItem{Action: action, ToolCmd: toolCmd})
 	}
-	if len(todos) > 0 {
-		return todos
+	if len(todos) < 2 {
+		return nil
 	}
-	return nil
+	hasTool := false
+	for _, t := range todos {
+		if t.ToolCmd != "" {
+			hasTool = true
+			break
+		}
+	}
+	if !hasTool {
+		return nil
+	}
+	return todos
 }
 
 // extractStepAction detects step lines by common patterns and extracts the action.
