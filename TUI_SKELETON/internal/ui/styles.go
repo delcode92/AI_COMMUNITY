@@ -53,6 +53,10 @@ var (
 	MessageStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorText))
 
+	MessageBoldStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorText)).
+				Bold(true)
+
 	SubtleStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorSubtle))
 

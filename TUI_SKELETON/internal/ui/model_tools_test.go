@@ -57,6 +57,20 @@ Verifying...
 			wantLen:  1,
 			wantTool: "shell",
 		},
+		{
+			name:     "OpenAI-style XML-wrapped tool with command key",
+			response: "<shell>\n{\"command\":\"ls\",\"args\":[\"-la\"]}\n</shell>",
+			wantLen:  1,
+			wantTool: "shell",
+			wantArgs: "-la",
+		},
+		{
+			name:     "OpenAI-style XML-wrapped tool on single line",
+			response: "<shell>{\"command\":\"echo\",\"args\":[\"hello\"]}</shell>",
+			wantLen:  1,
+			wantTool: "shell",
+			wantArgs: "echo hello",
+		},
 	}
 
 	for _, tt := range tests {

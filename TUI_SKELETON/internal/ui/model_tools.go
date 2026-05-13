@@ -45,15 +45,40 @@ func (m *Model) extractToolCommands(response string) []pendingTool {
 		}
 	}
 
+	// Pattern 4: OpenAI-style XML-wrapped tool calls: <toolname>{"command":"...","args":[...]}</toolname>
+	xmlPattern := regexp.MustCompile(`<(\w+)>\s*(\{[^}]+\})\s*</\w+>`)
+	for _, match := range xmlPattern.FindAllStringSubmatch(response, -1) {
+		if len(match) > 2 && !seen[match[0]] {
+			seen[match[0]] = true
+			toolName := match[1]
+			// Parse inner JSON which has "command" and "args"
+			var inner struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			}
+			if err := json.Unmarshal([]byte(match[2]), &inner); err == nil && inner.Command != "" {
+				allArgs := append([]string{inner.Command}, inner.Args...)
+				tools = append(tools, pendingTool{name: toolName, args: strings.Join(allArgs, " ")})
+			}
+		}
+	}
+
 	return tools
 }
 
 func (m *Model) parseAndAddTool(raw string, tools *[]pendingTool) {
 	var parsed struct {
-		Tool string   `json:"tool"`
-		Args []string `json:"args"`
+		Tool    string   `json:"tool"`
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
 	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && parsed.Tool != "" {
-		*tools = append(*tools, pendingTool{name: parsed.Tool, args: strings.Join(parsed.Args, " ")})
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+		name := parsed.Tool
+		if name == "" {
+			name = parsed.Command
+		}
+		if name != "" {
+			*tools = append(*tools, pendingTool{name: name, args: strings.Join(parsed.Args, " ")})
+		}
 	}
 }

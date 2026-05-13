@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -186,11 +185,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.saveHistory()
 			return m, tea.Quit
 
-		case tea.KeyRunes:
-			if len(msg.Runes) > 0 && msg.Runes[0] == 'd' {
-				m.addDebug("debug keypress")
-			}
-
 		case tea.KeyUp:
 			if m.showCmds {
 				matches := filterCommands(m.cmdInput)
@@ -228,7 +222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyEnter:
 			if m.streaming {
-				break
+				return m, nil
 			}
 
 			input := strings.TrimSpace(m.textarea.Value())
@@ -540,7 +534,7 @@ func (m *Model) onStreamDone(response string) {
 	}
 
 	// 3. Check for explicit standalone tool commands (not part of a workflow)
-	if tools := extractToolCommands(response); len(tools) > 0 {
+	if tools := m.extractToolCommands(response); len(tools) > 0 {
 		m.pendingTodos = nil
 		m.applyManualTool(fmt.Sprintf(`/tool {"tool":"%s","args":[%s]}`, tools[0].name, formatArgsForJSON(tools[0].args)))
 		m.updateView()
@@ -714,12 +708,39 @@ func (m Model) renderMessages() string {
 			}
 			sb.WriteString(AssistantLabelStyle.PaddingLeft(2).Render("assistant"))
 			sb.WriteString("\n")
-			sb.WriteString(MessageStyle.PaddingLeft(4).Width(w).Render(content))
+			sb.WriteString(renderBoldMarkdown(content, w))
 		}
 		sb.WriteString("\n")
 	}
 	if m.err != "" {
 		sb.WriteString(fmt.Sprintf("\n%s\n", ErrorStyle.PaddingLeft(4).Render("✗ "+m.err)))
+	}
+	return sb.String()
+}
+
+// renderBoldMarkdown renders text with **bold** markdown support.
+func renderBoldMarkdown(text string, width int) string {
+	var sb strings.Builder
+	remaining := text
+	for {
+		idx := strings.Index(remaining, "**")
+		if idx == -1 {
+			sb.WriteString(MessageStyle.PaddingLeft(4).Width(width).Render(remaining))
+			break
+		}
+		// Write the normal part before the bold marker
+		if idx > 0 {
+			sb.WriteString(MessageStyle.PaddingLeft(4).Width(width).Render(remaining[:idx]))
+		}
+		remaining = remaining[idx+2:]
+		// Find the closing **
+		endIdx := strings.Index(remaining, "**")
+		if endIdx == -1 {
+			sb.WriteString(MessageBoldStyle.PaddingLeft(4).Width(width).Render(remaining))
+			break
+		}
+		sb.WriteString(MessageBoldStyle.PaddingLeft(4).Width(width).Render(remaining[:endIdx]))
+		remaining = remaining[endIdx+2:]
 	}
 	return sb.String()
 }
@@ -999,56 +1020,6 @@ func formatTodoList(todos []todoItem) string {
 	}
 	sb.WriteString("\nProceed? (y/Enter=yes, n=no)")
 	return sb.String()
-}
-
-// ── Tool command extraction ─────────────────────────────────────────────────
-
-func extractToolCommands(response string) []pendingTool {
-	var tools []pendingTool
-	seen := make(map[string]bool)
-
-	toolPattern := regexp.MustCompile(`(?i)/tool\s*(\{[^}]*"tool"[^}]*\})`)
-	for _, match := range toolPattern.FindAllStringSubmatch(response, -1) {
-		if len(match) > 1 && !seen[match[1]] {
-			seen[match[1]] = true
-			if pt := parseToolJSON(match[1]); pt.name != "" {
-				tools = append(tools, pt)
-			}
-		}
-	}
-
-	jsonPattern := regexp.MustCompile(`\{[^{}]*"tool"\s*:\s*"[^"]+"[^{}]*"args"\s*:\s*\[[^\]]*\][^{}]*\}`)
-	for _, match := range jsonPattern.FindAllString(response, -1) {
-		if !seen[match] {
-			seen[match] = true
-			if pt := parseToolJSON(match); pt.name != "" {
-				tools = append(tools, pt)
-			}
-		}
-	}
-
-	codeBlockPattern := regexp.MustCompile(`(?:>>>|\s*>\s*<?)tool\s*(\{[^}]+\})`)
-	for _, match := range codeBlockPattern.FindAllStringSubmatch(response, -1) {
-		if len(match) > 1 && !seen[match[1]] {
-			seen[match[1]] = true
-			if pt := parseToolJSON(match[1]); pt.name != "" {
-				tools = append(tools, pt)
-			}
-		}
-	}
-
-	return tools
-}
-
-func parseToolJSON(raw string) pendingTool {
-	var parsed struct {
-		Tool string   `json:"tool"`
-		Args []string `json:"args"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && parsed.Tool != "" {
-		return pendingTool{name: parsed.Tool, args: strings.Join(parsed.Args, " ")}
-	}
-	return pendingTool{}
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
